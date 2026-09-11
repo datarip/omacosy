@@ -310,9 +310,11 @@ case "split-hint":
     // the focus change — faster than any app can open its next window.
     //
     // Refocusing an EXISTING window (hover, keyboard) reads the frame
-    // directly: it already sits in its slot, no waiting needed. The
-    // slow settle-wait survives only as the fallback when there is no
-    // fresh state to chain from (first window in a burst).
+    // directly: it usually already sits in its slot, so the hint lands
+    // at once, and is then checked (see the end of this case) for the
+    // refocus that follows a window leaving. The slow settle-wait
+    // survives as the fallback when there is no fresh state to chain
+    // from (first window in a burst).
     // State is one line: "wid w h ts". A 3s TTL bounds how stale a
     // chain can get (manual resizes, closes, and workspace switches
     // invalidate predictions; a burst of opens never lives that long).
@@ -323,7 +325,56 @@ case "split-hint":
             let w = b["Width"], let h = b["Height"] else { return nil }
         return (x, y, w, h)
     }
+    // Wait for the frame to stop moving. "Two equal samples" alone is not
+    // enough — an untiled window's frame equals itself — so a window must
+    // MOVE before its frame counts as settled, while one that never moves
+    // is accepted after a short grace. Full bounds, not just size: a
+    // spawning terminal inherits the last window's size, so only the
+    // position reliably changes on tile.
+    func settle() -> (frame: (CGFloat, CGFloat, CGFloat, CGFloat)?, moved: Bool) {
+        var sample = frame()
+        var moved = false
+        for tick in 1...16 {
+            usleep(75_000)
+            let next = frame()
+            if let a = sample, let b = next, a != b { moved = true }
+            if next == nil || (moved && next! == sample!) { sample = next; break }
+            sample = next
+            if !moved && tick >= 5 { break }
+        }
+        return (sample, moved)
+    }
+    // Direction: Hyprland's rule is `stack when h * multiplier > w`
+    // (dwindle:split_width_multiplier, default 1.0). At 1.0 an
+    // ultrawide's half-slot (1712x1389) is still wider than tall, so
+    // the spiral goes side-by-side twice before it ever stacks. 1.4
+    // makes that half-slot stack first, which restores the 16:9
+    // left/down/left cadence on a 3440-wide display without changing
+    // behavior on displays where the half is already taller than wide.
     let splitWidthMultiplier: CGFloat = 1.4
+    func direction(_ w: CGFloat, _ h: CGFloat) -> String {
+        w >= h * splitWidthMultiplier ? "horizontal" : "vertical"
+    }
+    let aerospaceBin = ["/opt/homebrew/bin/aerospace", "/usr/local/bin/aerospace"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "aerospace"
+    func split(_ dir: String) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: aerospaceBin)
+        p.arguments = ["split", "--window-id", idStr, dir]
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+    let logPath = "/tmp/omacosy-split-hint.log"
+    func note(_ w: CGFloat, _ h: CGFloat, _ how: String, _ dir: String, _ rc: Int32?) {
+        guard let d = "\(Date().timeIntervalSince1970) wid=\(idStr) \(Int(w))x\(Int(h)) (\(how)) -> \(dir == "horizontal" ? "h" : "v") rc=\(rc.map(String.init) ?? "-")\n".data(using: .utf8),
+            let fh = FileHandle(forWritingAtPath: logPath) ?? {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                return FileHandle(forWritingAtPath: logPath)
+            }() else { return }
+        fh.seekToEndOfFile(); fh.write(d); fh.closeFile()
+    }
     let statePath = "/tmp/omacosy-split-state-\(getuid())"
     let now = Date().timeIntervalSince1970
     var state: (wid: UInt32, w: CGFloat, h: CGFloat)?
@@ -340,55 +391,47 @@ case "split-hint":
         if s.w >= s.h * splitWidthMultiplier { w = s.w / 2; h = s.h } else { w = s.w; h = s.h / 2 }
         how = "predicted"
     } else if state != nil, let f = frame() {
-        // an existing window refocused mid-burst: its frame is settled
+        // an existing window refocused mid-burst: usually settled, and
+        // checked below for when it is not
         (w, h) = (f.2, f.3)
         how = "read"
     } else {
-        // no fresh chain to ride: wait for the frame to stop moving.
-        // "Two equal samples" alone is not enough — an untiled window's
-        // frame equals itself — so a new window must MOVE (get tiled)
-        // before its frame is trusted, while a hover-focused window that
-        // never moves is accepted after a short grace. Full bounds, not
-        // just size: a spawning terminal inherits the last window's
-        // size, so only the position reliably changes on tile.
-        var sample = frame()
-        var moved = false
-        for tick in 1...16 {
-            usleep(75_000)
-            let next = frame()
-            if let a = sample, let b = next, a != b { moved = true }
-            if next == nil || (moved && next! == sample!) { sample = next; break }
-            sample = next
-            if !moved && tick >= 5 { break }
-        }
-        guard let f = sample else { exit(0) }
+        // no fresh chain to ride: wait for the frame to stop moving
+        let settled = settle()
+        guard let f = settled.frame else { exit(0) }
         (w, h) = (f.2, f.3)
-        how = moved ? "settled" : "static"
+        how = settled.moved ? "settled" : "static"
     }
-    // Direction: Hyprland's rule is `stack when h * multiplier > w`
-    // (dwindle:split_width_multiplier, default 1.0). At 1.0 an
-    // ultrawide's half-slot (1712x1389) is still wider than tall, so
-    // the spiral goes side-by-side twice before it ever stacks. 1.4
-    // makes that half-slot stack first, which restores the 16:9
-    // left/down/left cadence on a 3440-wide display without changing
-    // behavior on displays where the half is already taller than wide.
-    let dir = w >= h * splitWidthMultiplier ? "horizontal" : "vertical"
-    let aerospaceBin = ["/opt/homebrew/bin/aerospace", "/usr/local/bin/aerospace"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "aerospace"
-    let split = Process()
-    split.executableURL = URL(fileURLWithPath: aerospaceBin)
-    split.arguments = ["split", "--window-id", idStr, dir]
-    split.standardError = FileHandle.nullDevice
-    try? split.run()
-    split.waitUntilExit()
-    try? "\(wid) \(w) \(h) \(now)".write(toFile: statePath, atomically: true, encoding: .utf8)
-    if let d = "\(Date().timeIntervalSince1970) wid=\(idStr) \(Int(w))x\(Int(h)) (\(how)) -> \(dir == "horizontal" ? "h" : "v") rc=\(split.terminationStatus)\n".data(using: .utf8),
-        let fh = FileHandle(forWritingAtPath: "/tmp/omacosy-split-hint.log") ?? {
-            FileManager.default.createFile(atPath: "/tmp/omacosy-split-hint.log", contents: nil)
-            return FileHandle(forWritingAtPath: "/tmp/omacosy-split-hint.log")
-        }() {
-        fh.seekToEndOfFile(); fh.write(d); fh.closeFile()
-    }
+    let dir = direction(w, h)
+    let rc = split(dir)
+    let stamp = "\(wid) \(w) \(h) \(now)"
+    try? stamp.write(toFile: statePath, atomically: true, encoding: .utf8)
+    note(w, h, how, dir, rc)
+
+    // A read trusts the frame to be settled, and a refocus by hover or
+    // keyboard is exactly that. A refocus caused by a window LEAVING is
+    // not (issue #17): close the second window and the survivor takes
+    // focus while AeroSpace has yet to re-expand it, so the read catches
+    // its old half-size slot. No liveness test tells the two apart — the
+    // window server still lists a just-closed window, and a window moved
+    // or hidden away is alive anyway. So the read keeps its speed and is
+    // then watched for the settle grace. If the frame changes, the
+    // settled frame decides: the state is corrected, because the NEXT
+    // window's prediction halves this slot and a changed size matters
+    // even when the direction holds, and a changed direction is issued
+    // again.
+    //
+    // Issuing it again is invisible: the split above left this window as
+    // its container's only child, and `split` on an only child just turns
+    // that container. That holds only while no window has joined it, so
+    // any newer hint in the state file cancels the correction — a second
+    // split would nest the newcomer.
+    guard how == "read", let f = settle().frame, (f.2, f.3) != (w, h),
+        (try? String(contentsOfFile: statePath, encoding: .utf8)) == stamp else { exit(0) }
+    let fixed = direction(f.2, f.3)
+    let rcFixed: Int32? = fixed == dir ? nil : split(fixed)
+    try? "\(wid) \(f.2) \(f.3) \(Date().timeIntervalSince1970)".write(toFile: statePath, atomically: true, encoding: .utf8)
+    note(f.2, f.3, "re-read", fixed, rcFixed)
 
 case "audio":
     let sub = args.count > 2 ? args[2] : "list"

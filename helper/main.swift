@@ -375,9 +375,15 @@ case "split-hint":
     // refocus that follows a window leaving. The slow settle-wait
     // survives as the fallback when there is no fresh state to chain
     // from (first window in a burst).
-    // State is one line: "wid w h ts". A 3s TTL bounds how stale a
-    // chain can get (manual resizes, closes, and workspace switches
-    // invalidate predictions; a burst of opens never lives that long).
+    // State is one line: "wid w h ts verified maxWid ws". A 3s TTL bounds
+    // how stale a chain can get (manual resizes, closes, and workspace
+    // switches invalidate predictions; a burst of opens never lives that
+    // long). The first five fields are the ones older helpers read.
+    // `maxWid` is the highest id ever hinted: ids only increase, so an id
+    // above it is a new window, while `wid > s.wid` alone also passes an
+    // older window with a higher id. `ws` is the workspace the slot was
+    // measured on: a lone window on an empty workspace must not chain off
+    // a slot measured on the workspace just left.
     func frame() -> (CGFloat, CGFloat, CGFloat, CGFloat)? {
         guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]],
             let b = list.first?[kCGWindowBounds as String] as? [String: CGFloat],
@@ -437,26 +443,57 @@ case "split-hint":
     }
     let statePath = "/tmp/omacosy-split-state-\(getuid())"
     let now = Date().timeIntervalSince1970
-    var state: (wid: UInt32, w: CGFloat, h: CGFloat, verified: Bool)?
+    // the focused workspace, as aerospace.toml's workspace-change hook
+    // writes it for the bar: a file read, so no subprocess on this path.
+    // "" when unknown, and an unknown side never refuses a chain.
+    let currentWs = ((try? String(contentsOfFile: "/tmp/omacosy-bar-ws", encoding: .utf8)) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    var state: (wid: UInt32, w: CGFloat, h: CGFloat, verified: Bool, ws: String)?
+    var maxWid: UInt32 = 0
     if let line = try? String(contentsOfFile: statePath, encoding: .utf8) {
-        let f = line.split(separator: " ").compactMap { Double($0) }
-        // "wid w h ts" is the old four-field line and counts as verified;
-        // the fifth field is 0 while a read is still unchecked
-        if f.count >= 4, now - f[3] < 3 {
-            state = (UInt32(f[0]), CGFloat(f[1]), CGFloat(f[2]), f.count < 5 || f[4] != 0)
+        let parts = line.split(separator: " ").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        // Numbers come from a fixed prefix, because the workspace name may
+        // be a number too. "wid w h ts" (four fields) counts as verified;
+        // "wid w h ts verified" is the five-field line; seven adds maxWid
+        // and ws. An eight-field "wid w h ts maxWid count verified ws" line
+        // is from an earlier build of this branch and is read as such.
+        let n = parts.count >= 8 ? 7 : min(parts.count, 6)
+        let f = parts.prefix(n).compactMap { Double($0) }
+        let ids = 0...Double(UInt32.max)
+        if f.count == n, n >= 4, ids.contains(f[0]) {
+            let old8 = parts.count >= 8
+            let verified = n < 5 || (old8 ? f[6] != 0 : f[4] != 0)
+            let mw = old8 ? f[4] : (n >= 6 ? f[5] : 0)
+            if ids.contains(mw) { maxWid = UInt32(mw) }
+            let ws = old8 ? parts[7] : (parts.count >= 7 ? parts[6] : "")
+            // maxWid is kept past the TTL on purpose: an expired line still
+            // proves its ids were seen
+            if now - f[3] < 3 {
+                state = (UInt32(f[0]), CGFloat(f[1]), CGFloat(f[2]), verified, ws == "-" ? "" : ws)
+            }
         }
+    }
+    // No state (a first window, or /tmp cleared by a restart): seed maxWid
+    // from every window macOS lists, so an old window with a high id is not
+    // taken for new by the NEXT run. In-process, and only on the path that
+    // is about to spend ~400ms settling anyway.
+    if state == nil,
+        let all = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] {
+        let top = all.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }.max() ?? 0
+        maxWid = max(maxWid, top)
     }
     var w: CGFloat
     var h: CGFloat
     var how: String
-    if let s = state, s.verified, wid > s.wid {
+    if let s = state, s.verified, wid > s.wid, wid > maxWid,
+        s.ws.isEmpty || currentWs.isEmpty || s.ws == currentWs {
         // fresh spawn inside a burst: its slot is the half left over
         // from the split we just issued on the previous window. Only a
         // VERIFIED slot may be halved: chaining off a read that has not
         // been checked yet is how a close poisoned the whole burst.
         if s.w >= s.h * splitWidthMultiplier { w = s.w / 2; h = s.h } else { w = s.w; h = s.h / 2 }
         how = "predicted"
-    } else if let s = state, wid <= s.wid, let f = frame() {
+    } else if state != nil, wid <= max(maxWid, state!.wid), let f = frame() {
         // an existing window refocused mid-burst: usually settled, and
         // checked below for when it is not
         (w, h) = (f.2, f.3)
@@ -469,7 +506,7 @@ case "split-hint":
         how = settled.moved ? "settled" : "static"
     }
     func stampLine(_ w: CGFloat, _ h: CGFloat, _ ts: Double, _ verified: Bool) -> String {
-        "\(wid) \(w) \(h) \(ts) \(verified ? 1 : 0)"
+        "\(wid) \(w) \(h) \(ts) \(verified ? 1 : 0) \(max(wid, maxWid)) \(currentWs.isEmpty ? "-" : currentWs)"
     }
     let dir = direction(w, h)
     let rc = split(dir)

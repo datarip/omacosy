@@ -102,6 +102,20 @@ fi
 
 STATE="/tmp/omacosy-split-state-$(id -u)"
 
+# A refocus read still in flight (field 5 is 0) is about to be checked: the
+# survivor of a close is measured before it re-expands, and split on that
+# stale size. A window opened now joins that container, and once it has,
+# the correction must not split again. So wait for the verdict first. Only
+# a read is ever provisional, so a burst of spawns never waits here.
+settle_by=$(( SECONDS + 2 ))
+while [ -f "$STATE" ] && [ "$SECONDS" -lt "$settle_by" ]; do
+  # the helper writes no line break, so `read` would report end-of-file
+  set -- $(cat "$STATE" 2>/dev/null); ts=${4:-0} verified=${5:-1}
+  [ "$verified" = 0 ] || break
+  [ $(( $(date +%s) - ${ts%.*} )) -lt 3 ] || break
+  sleep 0.05
+done
+
 
 prev=0
 [ -f "$STATE" ] && prev=$(cut -d' ' -f1 "$STATE")

@@ -210,6 +210,29 @@ If the native menu bar ever gets stuck revealed over the bar (a
 Tahoe bug, most often poked by a Focus mode's menu-bar icon),
 `killall SystemUIServer` resets it.
 
+### Whether the bar hides at rest
+
+```sh
+omacosy-bar-autohide          # what it is set to now, and what that means
+omacosy-bar-autohide auto     # let the display decide (the default)
+omacosy-bar-autohide on       # hide at rest, give the height back
+omacosy-bar-autohide off      # always visible
+```
+
+`auto` reads the display. A notched panel keeps the bar visible, because
+macOS already excludes the camera strip from the usable area and hiding the
+bar there gives back no screen. A flat panel or an external monitor hides
+the bar at rest, and windows get that height.
+
+This is a command rather than a line to edit, because the setting alone is
+not the whole change. A bar that stays visible occupies the top of the
+panel, so tiled windows have to start below it; a bar that hides gives that
+height back and the windows need only the ordinary margin. The command
+writes `autohide` in `~/.config/omacosy/bar.conf`, resizes aerospace's
+`outer.top` gap to match, and restarts the bar. Editing the file by hand
+sets the bar and not the gap, which either buries the bar under a window or
+reserves space for a bar that is not there.
+
 ### Workspace icons
 
 You can set workspace icons in the optional

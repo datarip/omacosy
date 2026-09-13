@@ -274,28 +274,17 @@ func safeTop(for d: CGRect) -> CGFloat {
     return 0
 }
 
-// Under OmniWM this test cannot work: its 0.6.3 dwindle applies no
-// outer gaps (upstream bug, docs/omniwm-port.md), so every tile starts
-// at the safe-area edge at full height and reads as fullscreen — the
-// ring vanished and the shroud black-banded the bar's strip. Until the
-// gap bug is fixed, OmniWM mode keeps ring and strip, accepting ring
-// overlap on a true fullscreen window.
-
-// Cached for 0.5s: the lookup walks every running app (0.36ms) and runs
-// twice per tick, which adds up across a drag.
-var omniwmCached = false
-var omniwmCheckedAt = Date.distantPast
-func omniwmActive() -> Bool {
-    if Date().timeIntervalSince(omniwmCheckedAt) < 0.5 { return omniwmCached }
-    omniwmCheckedAt = Date()
-    omniwmCached = NSWorkspace.shared.runningApplications.contains {
-        $0.bundleIdentifier == "com.barut.OmniWM"
-    }
-    return omniwmCached
-}
+// The OmniWM exemption is gone, 2026-09-13. It existed because dwindle
+// applied no outer gaps, so every tile started at the safe-area edge at
+// full height and read as fullscreen — the ring vanished and the shroud
+// black-banded the bar's strip. OmniWM has the gaps now (8 on the sides,
+// bar-height + margin on top), so a tile starts 8 or 38 points down and
+// the `< inset + 3` test below correctly calls it NOT fullscreen, while a
+// native-fullscreen window at y=0 still trips it. An OmniWM Super+F window
+// keeps the outer gaps too, so it also reads as not-fullscreen — which is
+// right: it does not cover the bar.
 
 func isFullscreen(_ r: CGRect) -> Bool {
-    if omniwmActive() { return false }
     var ids = [CGDirectDisplayID](repeating: 0, count: 8)
     var n: UInt32 = 0
     guard CGGetActiveDisplayList(8, &ids, &n) == .success else { return false }
@@ -498,17 +487,12 @@ func recheck(after delay: Double) {
 }
 
 func tick() {
-    // Under OmniWM the ring is parked entirely: OmniWM draws its own
-    // border (themed by theme-set writing [borders.color] into its
-    // settings), and the WM's border hugs screen edges where our
-    // outside-stroked ring clips — tiles touch the edges there (the
-    // 0.6.3 outer-gap bug). The daemon stays resident so switching
-    // back to AeroSpace needs no restart.
-    if omniwmActive() {
-        hideRing("omniwm")
-        syncShroud(nil)
-        return
-    }
+    // The ring draws under OmniWM too, since 2026-09-13. It used to be
+    // parked there: OmniWM drew its own border because our outside-stroked
+    // ring clipped where tiles touched the screen edges. With outer gaps
+    // applied there is room to stroke outside, so one ring serves both
+    // managers — same width, same radius, same per-app radii. OmniWM's own
+    // [borders] is off in settings.toml to keep it to one.
     noteStat(event: false)
     guard let hit = focusedWindowFrame() else {
         // ring already hidden: there is nothing to hide and nothing

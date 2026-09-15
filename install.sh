@@ -134,8 +134,12 @@ zshrc_setup() {
   if [ -f "$zshrc" ] && [ ! -L "$zshrc" ] && grep -qxF "$ZSHRC_MARK" "$zshrc"; then
     if ! grep -qF "source \"$repo/zsh/zshrc\"" "$zshrc"; then
       log "Clone moved — repointing the ~/.zshrc stub at $repo"
-      sed -i '' -E "s|^\[ -r \".*/zsh/zshrc\" \].*|[ -r \"$repo/zsh/zshrc\" ] \&\& source \"$repo/zsh/zshrc\"|" "$zshrc"
-      cp "$zshrc" "$STATE_DIR/zshrc-stub.orig"
+      local repoint="s|^\[ -r \".*/zsh/zshrc\" \].*|[ -r \"$repo/zsh/zshrc\" ] \&\& source \"$repo/zsh/zshrc\"|"
+      sed -i '' -E "$repoint" "$zshrc"
+      # the same edit, not a copy: a copy would count appended lines as ours, and uninstall would drop them
+      if [ -f "$STATE_DIR/zshrc-stub.orig" ]; then
+        sed -i '' -E "$repoint" "$STATE_DIR/zshrc-stub.orig"
+      fi
     fi
     return
   fi

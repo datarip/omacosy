@@ -377,20 +377,26 @@ case "split-hint":
     }
     let statePath = "/tmp/omacosy-split-state-\(getuid())"
     let now = Date().timeIntervalSince1970
-    var state: (wid: UInt32, w: CGFloat, h: CGFloat)?
+    var state: (wid: UInt32, w: CGFloat, h: CGFloat, verified: Bool)?
     if let line = try? String(contentsOfFile: statePath, encoding: .utf8) {
         let f = line.split(separator: " ").compactMap { Double($0) }
-        if f.count == 4, now - f[3] < 3 { state = (UInt32(f[0]), CGFloat(f[1]), CGFloat(f[2])) }
+        // "wid w h ts" is the old four-field line and counts as verified;
+        // the fifth field is 0 while a read is still unchecked
+        if f.count >= 4, now - f[3] < 3 {
+            state = (UInt32(f[0]), CGFloat(f[1]), CGFloat(f[2]), f.count < 5 || f[4] != 0)
+        }
     }
     var w: CGFloat
     var h: CGFloat
     var how: String
-    if let s = state, wid > s.wid {
+    if let s = state, s.verified, wid > s.wid {
         // fresh spawn inside a burst: its slot is the half left over
-        // from the split we just issued on the previous window
+        // from the split we just issued on the previous window. Only a
+        // VERIFIED slot may be halved: chaining off a read that has not
+        // been checked yet is how a close poisoned the whole burst.
         if s.w >= s.h * splitWidthMultiplier { w = s.w / 2; h = s.h } else { w = s.w; h = s.h / 2 }
         how = "predicted"
-    } else if state != nil, let f = frame() {
+    } else if let s = state, wid <= s.wid, let f = frame() {
         // an existing window refocused mid-burst: usually settled, and
         // checked below for when it is not
         (w, h) = (f.2, f.3)
@@ -402,9 +408,16 @@ case "split-hint":
         (w, h) = (f.2, f.3)
         how = settled.moved ? "settled" : "static"
     }
+    func stampLine(_ w: CGFloat, _ h: CGFloat, _ ts: Double, _ verified: Bool) -> String {
+        "\(wid) \(w) \(h) \(ts) \(verified ? 1 : 0)"
+    }
     let dir = direction(w, h)
     let rc = split(dir)
-    let stamp = "\(wid) \(w) \(h) \(now)"
+    // A read is published PROVISIONAL. The single wrong split was never the
+    // worst of issue #17: the stale slot went into the chain, and the next
+    // window halved it. Until the watch below confirms the slot, a window
+    // opening inside the grace takes the settle path instead of chaining.
+    let stamp = stampLine(w, h, now, how != "read")
     try? stamp.write(toFile: statePath, atomically: true, encoding: .utf8)
     note(w, h, how, dir, rc)
 
@@ -415,23 +428,45 @@ case "split-hint":
     // its old half-size slot. No liveness test tells the two apart — the
     // window server still lists a just-closed window, and a window moved
     // or hidden away is alive anyway. So the read keeps its speed and is
-    // then watched for the settle grace. If the frame changes, the
-    // settled frame decides: the state is corrected, because the NEXT
-    // window's prediction halves this slot and a changed size matters
-    // even when the direction holds, and a changed direction is issued
-    // again.
+    // then watched until its frame holds still — the settle grace of
+    // ~375ms when nothing moves, up to ~1.2s once something does. If the
+    // frame changed, the settled frame decides: the slot is published,
+    // because the NEXT window's prediction halves it, and a direction
+    // that flipped is issued again.
     //
     // Issuing it again is invisible: the split above left this window as
     // its container's only child, and `split` on an only child just turns
     // that container. That holds only while no window has joined it, so
     // any newer hint in the state file cancels the correction — a second
     // split would nest the newcomer.
-    guard how == "read", let f = settle().frame, (f.2, f.3) != (w, h),
-        (try? String(contentsOfFile: statePath, encoding: .utf8)) == stamp else { exit(0) }
+    guard how == "read" else { exit(0) }
+    let watched = settle().frame
+    // Still ours? A newer line means another hint owns the chain now.
+    guard (try? String(contentsOfFile: statePath, encoding: .utf8)) == stamp,
+        let f = watched else { exit(0) }
+    // 2pt of slack: a frame that jitters by a pixel has not moved.
+    let tol: CGFloat = 2
+    let grew = f.2 > w + tol || f.3 > h + tol
+    let shrank = f.2 < w - tol || f.3 < h - tol
+    guard grew || shrank else {
+        // settled where it was read: the same slot, now verified
+        try? stampLine(w, h, Date().timeIntervalSince1970, true)
+            .write(toFile: statePath, atomically: true, encoding: .utf8)
+        exit(0)
+    }
     let fixed = direction(f.2, f.3)
-    let rcFixed: Int32? = fixed == dir ? nil : split(fixed)
-    try? "\(wid) \(f.2) \(f.3) \(Date().timeIntervalSince1970)".write(toFile: statePath, atomically: true, encoding: .utf8)
-    note(f.2, f.3, "re-read", fixed, rcFixed)
+    // Only a slot that GREW may be split again. A survivor re-expanding
+    // after a close grows; a window JOINING this container shrinks it, and
+    // a join is not always announced — `omacosy-layout togglesplit` retiles
+    // in place, and a window can open without taking focus, so neither
+    // writes a hint the guard above could see. Splitting then would nest
+    // the newcomer. The slot is still published either way: the next
+    // window's prediction halves it, so a changed size matters even when
+    // nothing is re-split.
+    let rcFixed: Int32? = (grew && !shrank && fixed != dir) ? split(fixed) : nil
+    try? stampLine(f.2, f.3, Date().timeIntervalSince1970, true)
+        .write(toFile: statePath, atomically: true, encoding: .utf8)
+    note(f.2, f.3, shrank ? "re-read, shrank" : "re-read", fixed, rcFixed)
 
 case "audio":
     let sub = args.count > 2 ? args[2] : "list"

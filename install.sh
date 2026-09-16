@@ -134,7 +134,10 @@ zshrc_setup() {
   # (b) a real file that is not ours IS the user's shell config. Copy it
   #     into ~/.zshrc.local so it keeps loading. Never merge into an
   #     existing ~/.zshrc.local: which lines win is not ours to decide.
-  if [ -f "$zshrc" ] && [ ! -L "$zshrc" ]; then
+  #     A copy WE made is not the user's: link() copies zsh/zshrc here for
+  #     a TCC-protected clone and marks it, and zsh/zshrc sources
+  #     ~/.zshrc.local, so copying it there would make it source itself.
+  if [ -f "$zshrc" ] && [ ! -L "$zshrc" ] && ! have "copied-config $zshrc"; then
     if [ ! -e "$local_rc" ]; then
       cp -p "$zshrc" "$local_rc"
       mark "created-zshrc-local"
@@ -157,7 +160,7 @@ zshrc_setup() {
       *) mark "$(printf 'prior-symlink\t%s\t%s' "$zshrc" "$cur")" ;;
     esac
     rm -f "$zshrc"
-  elif [ -e "$zshrc" ]; then
+  elif [ -e "$zshrc" ] && ! have "copied-config $zshrc"; then
     local bak="$zshrc.bak.$(date +%Y%m%d%H%M%S)"
     log "Backing up $zshrc -> $bak"
     mv "$zshrc" "$bak"

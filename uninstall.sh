@@ -120,12 +120,10 @@ restore() {
   fi
 }
 
-# configs COPIED for TCC-protected clones are ours to delete; the
-# restore() calls below then bring back backups / displaced symlinks
-grep '^copied-config ' "$MANIFEST" 2>/dev/null | sed 's/^copied-config //' |
-  while IFS= read -r d; do rm -rf "$d"; done
-
 # --- ~/.zshrc stub: remove it only when it is exactly what we wrote --------
+# BEFORE the copied-config sweep below: a stock install from a
+# TCC-protected clone marked ~/.zshrc as a copied config, and that rm -rf
+# would take the stub together with any line the user appended to it.
 zshrc_unstub() {
   local zshrc="$HOME/.zshrc" orig="$HOME/.local/state/omacosy/zshrc-stub.orig"
   have "wrote-zshrc-stub" || return 0
@@ -139,6 +137,12 @@ zshrc_unstub() {
   fi
 }
 zshrc_unstub
+
+# configs COPIED for TCC-protected clones are ours to delete; the
+# restore() calls below then bring back backups / displaced symlinks
+grep '^copied-config ' "$MANIFEST" 2>/dev/null | sed 's/^copied-config //' |
+  while IFS= read -r d; do rm -rf "$d"; done
+
 restore "$HOME/.zshrc"
 restore "$HOME/.config/starship.toml"
 restore "$HOME/.config/aerospace"

@@ -513,11 +513,22 @@ if [ ! -x "$HOME/.local/bin/omacosy-borders" ] || [ "$REPO_DIR/helper/borders.sw
   log "Building omacosy-borders"
   swiftc -O -F /System/Library/PrivateFrameworks -framework SkyLight -o "$HOME/.local/bin/omacosy-borders" "$REPO_DIR/helper/borders.swift"
 fi
+
+# Hiding the last window of a workspace must not move you, under OmniWM.
+# OmniWM follows an app activation macOS makes on its own; helper/recall.swift
+# has the measurements. (The Dock-click half was fixed in OmniWM 0.7.2 and is
+# gone.) omacosy-wm-switch loads this agent while OmniWM runs and unloads it
+# under AeroSpace.
+if [ ! -x "$HOME/.local/bin/omacosy-recall" ] || [ "$REPO_DIR/helper/recall.swift" -nt "$HOME/.local/bin/omacosy-recall" ]; then
+  log "Building omacosy-recall"
+  swiftc -O -o "$HOME/.local/bin/omacosy-recall" "$REPO_DIR/helper/recall.swift"
+fi
 # stable code identity so TCC grants survive rebuilds (skipped when no
 # signing identity works — then re-grant after each rebuild)
 sign "$HOME/.local/bin/omacosy-helper" com.omacosy.helper
 sign "$HOME/.local/bin/omacosy-borders" com.omacosy.borders
 sign "$HOME/.local/bin/omacosy-overview" com.omacosy.overview
+sign "$HOME/.local/bin/omacosy-recall" com.omacosy.recall
 # the BUNDLES are signed; the identifier is what grants key on
 sign "$BAR_APP" com.omacosy.bar
 sign "$FFM_APP" com.omacosy.ffm
@@ -553,6 +564,24 @@ cat > "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" <<PLIST
 PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.omacosy.borders.plist"
+
+# exits 0 on purpose under AeroSpace, so KeepAlive=true would respawn it
+# forever. Restart-on-failure only.
+cat > "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.omacosy.recall</string>
+  <key>ProgramArguments</key><array><string>$HOME/.local/bin/omacosy-recall</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardErrorPath</key><string>/tmp/omacosy-recall.err</string>
+</dict>
+</plist>
+PLIST
+launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" 2>/dev/null || true
+launchctl load "$HOME/Library/LaunchAgents/com.omacosy.recall.plist"
 
 cat > "$HOME/Library/LaunchAgents/com.omacosy.ffm.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

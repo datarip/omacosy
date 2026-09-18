@@ -68,9 +68,10 @@
 // it feeds the window cache, and it puts the desktop back if OmniWM moves
 // anyway. That correction is the backstop, not the mechanism.
 //
-// AeroSpace has no such bug. This process stays resident under it and does
-// nothing until OmniWM starts: at login it starts before OmniWM answers its
-// socket, and omacosy-wm-switch changes manager mid-session.
+// AeroSpace has no such bug. This process stays resident under it and acts
+// only while it holds a live subscription to OmniWM: at login it starts
+// before OmniWM answers its socket, and omacosy-wm-switch changes manager
+// mid-session.
 //
 // Modes:
 //   (none)      run in the foreground and act
@@ -262,8 +263,9 @@ final class Omni {
 
 let omni = Omni()
 
-// Is OmniWM running. Kept from launch and terminate notifications, because
-// asking NSWorkspace costs 9-16 ms and the hot path has 7 ms.
+// True while the watcher holds a live subscription. The socket closing is
+// the one signal that cannot miss OmniWM quitting; the terminate
+// notification did, and the handlers then acted under AeroSpace.
 final class Flag {
     private let lock = NSLock()
     private var value: Bool
@@ -272,9 +274,7 @@ final class Flag {
     func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
 }
 
-let omniwmBundleID = "com.barut.OmniWM"
-let omniwmUp = Flag(!NSRunningApplication
-    .runningApplications(withBundleIdentifier: omniwmBundleID).isEmpty)
+let attached = Flag(false)
 
 // Where the desktop is. Not a window: hiding Finder has to be answered too,
 // and Finder owns no window.
@@ -546,18 +546,14 @@ func watchWorkspaceMoves() {
     let stream = Omni(streaming: true)
     let fixer = Omni()
     while true {
-        guard omniwmUp.get() else {
-            Thread.sleep(forTimeInterval: 2.0)
-            continue
-        }
-        // OmniWM opens its socket some seconds after launch, so a refusal
-        // here is expected and retried.
+        // Refused while OmniWM is absent or still starting; retried.
         guard stream.subscribe(["active-workspace", "windows-changed"]) else {
             Thread.sleep(forTimeInterval: 2.0)
             stream.drop()
             continue
         }
         seed(fixer)
+        attached.set(true)
         tlog("attached to OmniWM")
         while let event = stream.nextEvent() {
             guard let result = event["result"] as? [String: Any],
@@ -598,6 +594,9 @@ func watchWorkspaceMoves() {
             fixer.focusWorkspace(t.workspaceName)
             tlog("held workspace \(t.workspaceName)")
         }
+        attached.set(false)
+        activeLock.lock(); activeWs = [:]; activeLock.unlock()
+        tlog("OmniWM connection closed — idle until it answers again")
         stream.drop()
         Thread.sleep(forTimeInterval: 1.0)
     }
@@ -648,7 +647,7 @@ func wasInFront(_ pid: Int, at t: Date) -> Bool {
 }
 
 func stay(_ app: NSRunningApplication) {
-    guard omniwmUp.get() else { return }
+    guard attached.get() else { return }
     let pid = Int(app.processIdentifier)
     let name = app.localizedName ?? "pid \(pid)"
     let asked = Date()
@@ -706,7 +705,7 @@ func stay(_ app: NSRunningApplication) {
 var lastRecall: [Int: Date] = [:]
 
 func recall(_ app: NSRunningApplication, on event: String) {
-    guard omniwmUp.get() else { return }
+    guard attached.get() else { return }
     let pid = Int(app.processIdentifier)
     let name = app.localizedName ?? "pid \(pid)"
 
@@ -762,7 +761,7 @@ if wantDaemon {
 }
 
 // The watcher thread seeds this in normal mode. A dry run has no watcher.
-if dryRun && omniwmUp.get() { seed(omni) }
+if dryRun, omni.query("active-workspace") != nil { seed(omni); attached.set(true) }
 
 finderApp = NSWorkspace.shared.runningApplications
     .first { $0.bundleIdentifier == "com.apple.finder" }
@@ -773,22 +772,6 @@ if let front = NSWorkspace.shared.frontmostApplication {
 }
 
 let nc = NSWorkspace.shared.notificationCenter
-
-nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
-               object: nil, queue: .main) { note in
-    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-          app.bundleIdentifier == omniwmBundleID else { return }
-    omniwmUp.set(true)
-    tlog("OmniWM started")
-}
-
-nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
-               object: nil, queue: .main) { note in
-    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-          app.bundleIdentifier == omniwmBundleID else { return }
-    omniwmUp.set(false)
-    tlog("OmniWM quit — idle until it starts again")
-}
 
 nc.addObserver(forName: NSWorkspace.didHideApplicationNotification,
                object: nil, queue: .main) { note in
@@ -822,6 +805,6 @@ if !dryRun {
     t.start()
 }
 
-tlog("omacosy-recall watching\(dryRun ? " (dry run)" : "")\(omniwmUp.get() ? "" : ", waiting for OmniWM")")
+tlog("omacosy-recall watching\(dryRun ? " (dry run)" : "")")
 NSApplication.shared.setActivationPolicy(.prohibited)
 RunLoop.main.run()

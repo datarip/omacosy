@@ -249,8 +249,7 @@ fi
 # window of a workspace took you off it, and clicking the Dock icon of a
 # hidden app did not bring you to it. Both come from OmniWM following an
 # app activation macOS made on its own; helper/recall.swift has the
-# measurements. AeroSpace never sees this — it exits at startup unless
-# OmniWM answers its socket.
+# measurements. Under AeroSpace it stays idle until OmniWM starts.
 if [ ! -x "$HOME/.local/bin/omacosy-recall" ] || [ "$REPO_DIR/helper/recall.swift" -nt "$HOME/.local/bin/omacosy-recall" ]; then
   log "Building omacosy-recall"
   swiftc -O -o "$HOME/.local/bin/omacosy-recall" "$REPO_DIR/helper/recall.swift"
@@ -303,8 +302,7 @@ PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.omacosy.borders.plist"
 
-# exits 0 on purpose under AeroSpace, so KeepAlive=true would respawn it
-# forever. Restart-on-failure only.
+# resident under both managers; restart-on-failure brings back a crash.
 cat > "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

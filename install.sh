@@ -565,8 +565,7 @@ PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.omacosy.borders.plist"
 
-# exits 0 on purpose under AeroSpace, so KeepAlive=true would respawn it
-# forever. Restart-on-failure only.
+# resident under both managers; restart-on-failure brings back a crash.
 cat > "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

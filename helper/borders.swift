@@ -626,16 +626,116 @@ func watch(_ path: String, create: Bool, handler: @escaping () -> Void) {
     src.resume()
 }
 
-// aerospace announces workspace switches by touching this file
-// (exec-on-workspace-change): hide instantly and arm the stability
-// gate — the SLS move-burst alone can't distinguish a switch from a
-// drag until the ghosts are already ringed
-watch("/tmp/omacosy-ws-switch", create: true) {
+// a workspace switch: hide instantly and arm the stability gate — the
+// SLS move-burst alone can't distinguish a switch from a drag until the
+// ghosts are already ringed
+func workspaceSwitched(_ source: String) {
     lastWsSwitchAt = Date()
     focusMayHaveChanged = true // the target workspace has its own focus
-    hideRing("workspace-switch")
+    hideRing("workspace-switch \(source)")
     syncShroud(nil) // the next tick re-covers if the target is fullscreen too
 }
+
+// aerospace announces workspace switches by touching this file
+// (exec-on-workspace-change)
+watch("/tmp/omacosy-ws-switch", create: true) { workspaceSwitched("aerospace") }
+
+// OmniWM has no exec hook: without its event the ring stayed on the old
+// window until the 0.35s miss gate, on every switch to an empty workspace
+let omniwmctlBin = ["/opt/homebrew/bin/omniwmctl",
+                    "/Applications/OmniWM.app/Contents/MacOS/omniwmctl"]
+    .first { FileManager.default.isExecutableFile(atPath: $0) }
+var omniBuffer = Data()
+
+// The event can land AFTER the ring already moved to the new workspace's
+// window (1 switch in 10); hiding then blinks a correct ring for 0.35s.
+// So hide unless the ring sits on the window OmniWM calls focused there.
+// Runs off the main thread: the query is a process spawn.
+func omniWorkspaceEvent(_ line: String) {
+    guard let root = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+        (root["kind"] as? String) == "event",
+        let payload = (root["result"] as? [String: Any])?["payload"] as? [String: Any]
+    else { return }
+    let wsId = (payload["workspace"] as? [String: Any])?["id"] as? String
+    let focused = omniFocusedWid(onWorkspace: wsId)
+    DispatchQueue.main.async {
+        if win.isVisible, let wid = focused, wid == lastWid {
+            lastWsSwitchAt = Date() // ring is already right: keep it
+            focusMayHaveChanged = true
+            tlog("keep reason=workspace-switch omniwm wid=\(wid)")
+        } else {
+            workspaceSwitched("omniwm")
+        }
+    }
+}
+
+// CG window number of the focused window on that workspace, nil if it
+// has none. OmniWM ids are "ow_" + base64("<uuid>:<pid>:<window number>").
+func omniFocusedWid(onWorkspace wsId: String?) -> UInt32? {
+    let omni = "\(NSHomeDirectory())/.local/bin/omacosy-omni"
+    let p = Process()
+    if FileManager.default.isExecutableFile(atPath: omni) {
+        p.executableURL = URL(fileURLWithPath: omni) // persistent socket, ~8 ms
+        p.arguments = ["query", "focused-window"]
+    } else if let bin = omniwmctlBin {
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = ["query", "focused-window", "--format", "json"]
+    } else { return nil }
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let payload = (root["result"] as? [String: Any])?["payload"] as? [String: Any],
+        let w = payload["window"] as? [String: Any],
+        let ws = (w["workspace"] as? [String: Any])?["id"] as? String, ws == wsId,
+        let id = w["id"] as? String, id.hasPrefix("ow_")
+    else { return nil }
+    var b64 = String(id.dropFirst(3))
+    b64 += String(repeating: "=", count: (4 - b64.count % 4) % 4)
+    guard let raw = Data(base64Encoded: b64),
+        let last = String(decoding: raw, as: UTF8.self).split(separator: ":").last
+    else { return nil }
+    return UInt32(last)
+}
+func startOmniSubscription() {
+    guard let bin = omniwmctlBin else { return } // AeroSpace-only machine
+    omniBuffer = Data()
+    // launchd's kickstart -k is SIGKILL and orphans our child under pid 1
+    let reap = Process()
+    reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+    reap.arguments = ["-P", "1", "-f", "omniwmctl subscribe active-workspace"]
+    try? reap.run()
+    reap.waitUntilExit()
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: bin)
+    // --reconnect waits out OmniWM restarts and AeroSpace sessions
+    p.arguments = ["subscribe", "active-workspace", "--no-send-initial",
+                   "--reconnect", "--format", "ndjson"]
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    // the handler runs serially on the pipe's own queue, so the buffer
+    // needs no lock and events keep their order
+    pipe.fileHandleForReading.readabilityHandler = { handle in
+        let chunk = handle.availableData
+        guard !chunk.isEmpty else { return }
+        omniBuffer.append(chunk)
+        while let nl = omniBuffer.firstIndex(of: 0x0A) {
+            let line = String(decoding: omniBuffer[omniBuffer.startIndex..<nl], as: UTF8.self)
+            omniBuffer = Data(omniBuffer[omniBuffer.index(after: nl)...])
+            omniWorkspaceEvent(line)
+        }
+    }
+    p.terminationHandler = { _ in
+        pipe.fileHandleForReading.readabilityHandler = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { startOmniSubscription() }
+    }
+    do { try p.run() } catch { tlog("omniwmctl subscribe failed: \(error)") }
+}
+startOmniSubscription()
 
 // theme-set swaps the ~/.config/omarchy/current/theme symlink — watch
 // the directory; the file behind the old symlink never changes itself

@@ -130,6 +130,18 @@ var lastFullScanAt = Date.distantPast
 // the flag clear and drags keep the shortcut.
 var focusMayHaveChanged = true
 
+// Close, quit and minimize fade a window out for ~250 ms before it leaves
+// the list. Fading means alpha below that window's own peak, so a window
+// that is always translucent still counts as present.
+var peakAlpha: [UInt32: Double] = [:]
+func fading(_ w: [String: Any]) -> Bool {
+    guard let n = w["kCGWindowNumber"] as? Int,
+        let a = (w["kCGWindowAlpha"] as? NSNumber)?.doubleValue else { return false }
+    let peak = max(peakAlpha[UInt32(n)] ?? 0, a)
+    peakAlpha[UInt32(n)] = peak
+    return a < peak * 0.9
+}
+
 // frontmost app's topmost normal window, in CG (top-left) coordinates
 func focusedWindowFrame() -> (CGRect, String)? {
     var psn = PSN()
@@ -150,7 +162,7 @@ func focusedWindowFrame() -> (CGRect, String)? {
         let b = w["kCGWindowBounds"] as? [String: Any],
         let x = b["X"] as? CGFloat, let y = b["Y"] as? CGFloat,
         let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat,
-        wd > 60, h > 60 {
+        wd > 60, h > 60, !fading(w) {
         return (CGRect(x: x, y: y, width: wd, height: h), name)
     }
     lastFullScanAt = now
@@ -163,7 +175,7 @@ func focusedWindowFrame() -> (CGRect, String)? {
             let b = w["kCGWindowBounds"] as? [String: Any],
             let x = b["X"] as? CGFloat, let y = b["Y"] as? CGFloat,
             let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat,
-            wd > 60, h > 60
+            wd > 60, h > 60, !fading(w)
         else { continue }
         let rect = CGRect(x: x, y: y, width: wd, height: h)
         // AeroSpace drags windows through offscreen stash positions
@@ -374,6 +386,7 @@ var pendingSince = Date.distantPast
 var shownApp = ""
 var justHid = true
 var lastFrame = CGRect.zero
+var shownWid: UInt32 = 0 // the window the ring marks, 0 while hidden
 var lastWsSwitchAt = Date.distantPast
 shape.strokeColor = loadColor()
 shape.lineWidth = conf.width
@@ -385,8 +398,18 @@ func hideRing(_ reason: String) {
     }
     lastFrame = .zero
     shownApp = ""
+    shownWid = 0
     justHid = true
     missSince = nil
+}
+
+// Hidden (Cmd+H) windows leave the on-screen list; closed and quit ones
+// fade, then leave the window list. Each makes the miss final.
+func ringedWindowGone() -> Bool {
+    guard shownWid != 0 else { return false }
+    guard let w = (CGWindowListCopyWindowInfo(.optionIncludingWindow, shownWid)
+        as? [[String: Any]])?.first else { return true }
+    return (w["kCGWindowIsOnscreen"] as? Bool) != true || fading(w)
 }
 
 // Storm handling (drags fire ~90 events/s): tick SYNCHRONOUSLY on the
@@ -461,6 +484,12 @@ func tick() {
             missSince = nil
             return
         }
+        // a window that is gone cannot come back within the gate below
+        if ringedWindowGone() {
+            hideRing("window-gone")
+            syncShroud(nil)
+            return
+        }
         // transient misses happen around app switches and popups —
         // hide only when the miss persists, or the ring blinks. Gates
         // are wall-clock, not tick counts: event-driven ticks arrive
@@ -508,6 +537,7 @@ func tick() {
         }
     }
     justHid = false
+    shownWid = lastWid
 
     guard f != lastFrame || !win.isVisible else { return }
     // same app moving on the same display glides tick-by-tick; any
@@ -618,6 +648,7 @@ func rebuildSubscriptions() {
     let set = Set(wids)
     guard set != subscribed, !wids.isEmpty else { return }
     subscribed = set
+    peakAlpha = peakAlpha.filter { set.contains($0.key) }
     _ = wids.withUnsafeBufferPointer {
         SLSRequestNotificationsForWindows(cid, $0.baseAddress!, Int32(wids.count))
     }
@@ -657,8 +688,19 @@ if SLSGetEventPort(cid, &eventPort).rawValue == 0,
     tlog("SLSGetEventPort failed — running on heartbeat only")
 }
 
+// A closing window fades out over ~240 ms and the window server sends
+// this connection nothing while it does, so the ring sat at full colour
+// on a window that was visibly going. Re-read the ringed window alone
+// (one window id, ~0.1 ms) often enough that no fade outlives it.
+let ringWatch = Timer(timeInterval: 0.05, repeats: true) { _ in
+    guard win.isVisible, ringedWindowGone() else { return }
+    hideRing("window-gone")
+    syncShroud(nil)
+}
+RunLoop.current.add(ringWatch, forMode: .common)
+
 // safety net for anything eventless (subscription races, missed
-// events): cheap at this cadence, and the only poll left
+// events): cheap at this cadence, and the only whole-list poll
 let timer = Timer(timeInterval: 0.5, repeats: true) { _ in
     rebuildSubscriptions()
     tick()

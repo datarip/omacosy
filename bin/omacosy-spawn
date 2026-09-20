@@ -1,6 +1,8 @@
 #!/bin/bash
 # omacosy-spawn <App> — open a new window of App, serialized so the
 # dwindle split hint keeps up.
+# omacosy-spawn --cmd <command...> — the same serialization for a
+# window that `open -na` cannot make.
 #
 # The split hint runs AFTER a window exists (on-focus-changed), so two
 # windows created at the same instant both land before any hint can
@@ -12,9 +14,6 @@
 # Spam then becomes a rapid, clean sequence instead of a simultaneous
 # mess. Worst case the wait gives up after about 5 s so a broken hint chain
 # can never wedge the terminal key.
-APP="$1"
-[ -n "$APP" ] || exit 1
-
 # A new Ghostty window can come from the instance that is already
 # running. `open -na` is a whole second app instance every time, a full
 # app launch, while Ghostty 1.3's scripting dictionary hands a window
@@ -53,6 +52,23 @@ spawn_app() {
   fi
   open -na "$1"
 }
+
+# --cmd exists because of Finder. Finder is always running, so
+# `open -na Finder` fails with "Launch failed"; a new Finder window
+# takes AppleScript instead. That spawn needs this lock exactly as
+# much: measured, four at once ran the split hint ONCE and left five
+# windows in one flat row. Only the command differs, so only the
+# command is a parameter.
+if [ "${1:-}" = "--cmd" ]; then
+  shift
+  [ "$#" -gt 0 ] || exit 1
+  SPAWN=("$@")
+else
+  [ -n "${1:-}" ] || exit 1
+  # a function name works here as any command does, so the default keeps
+  # the Ghostty fast path and --cmd keeps its own command
+  SPAWN=(spawn_app "$1")
+fi
 
 # macOS ships no flock; mkdir is the portable atomic lock. Both WM
 # paths need the same serialization, so it is taken ONCE here.
@@ -126,7 +142,7 @@ if wm_is_omniwm; then
   # never shows a window cannot wedge the terminal key.
   "$OMNI" wait-window "$before" 2000 >/dev/null 2>&1 &
   waiter=$!
-  spawn_app "$APP"
+  "${SPAWN[@]}"
   wait "$waiter" 2>/dev/null || true
   exit 0
 fi
@@ -150,7 +166,7 @@ done
 
 prev=0
 [ -f "$STATE" ] && prev=$(cut -d' ' -f1 "$STATE")
-spawn_app "$APP"
+"${SPAWN[@]}"
 SECONDS_AT_SPAWN=$SECONDS
 # wall clock, as for the lock. The old 40 sleeps of 0.05 were documented
 # as 2 s and measured ~5 s; 5 s is what the tiling has been tuned against,

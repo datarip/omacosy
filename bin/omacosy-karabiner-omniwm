@@ -28,7 +28,7 @@ TERMINAL=Ghostty BROWSER=Safari MUSIC=Spotify MESSENGER=Slack
 
 export KARABINER MARK TERMINAL BROWSER MUSIC MESSENGER
 python3 - "$1" <<'PY'
-import json, os, sys
+import json, os, shutil, sys
 
 path = os.environ["KARABINER"]
 mark = os.environ["MARK"]
@@ -93,6 +93,9 @@ rules = slot_rules + [
     rule("files", "f", SHIFT, cmd="open -a Finder"),
     rule("music", "m", SHIFT, cmd=f"open -a '{apps['MUSIC']}'"),
     rule("messenger", "g", SHIFT, cmd=f"open -a '{apps['MESSENGER']}'"),
+    # yazi, only where it is installed (see omacosy-files)
+    *([rule("yazi", "y", SHIFT, cmd=f"{home}/.local/bin/omacosy-files")]
+      if shutil.which("yazi") or os.path.exists("/opt/homebrew/bin/yazi") else []),
     rule("next theme", "t", SHIFT, cmd=f"{home}/.local/bin/theme-next"),
     rule("next wallpaper", "b", SHIFT, cmd=f"{home}/.local/bin/theme-bg-next"),
     rule("lock", "l", SHIFT, cmd=f"{home}/.local/bin/omacosy-helper lock"),

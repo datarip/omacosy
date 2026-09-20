@@ -211,6 +211,10 @@ for t in theme-set theme-next theme-bg-next omacosy-ws omacosy-toggle omacosy-fo
   target="$(readlink "$HOME/.local/bin/$t" 2>/dev/null || true)"
   case "$target" in *omacosy*) rm -f "$HOME/.local/bin/$t" ;; esac
 done
+# omacosy-files (Super+Shift+Y, yazi), by the same rule: only a link into a clone
+case "$(readlink "$HOME/.local/bin/omacosy-files" 2>/dev/null || true)" in
+  *omacosy*) rm -f "$HOME/.local/bin/omacosy-files" ;;
+esac
 
 # Put the pre-omacosy wallpaper back — theme-set overwrote every display
 # and the picture would otherwise stay as a souvenir. Restores only when

@@ -9,11 +9,14 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 usage() {
   cat <<'EOF'
-usage: ./install.sh [--aerospace | --omniwm]
+usage: ./install.sh [--aerospace | --omniwm] [--yazi]
 
   (no option)   keep the window manager this Mac runs; AeroSpace on a new Mac
   --aerospace   install and run AeroSpace
   --omniwm      install and run OmniWM; AeroSpace is not installed
+  --yazi        also install yazi, a file manager on Super+Shift+Y, with the
+                helpers it previews and searches with (fd, poppler, resvg,
+                sevenzip). Off by default; uninstall.sh removes what it added.
 
 The other window manager installs on first use:
   omacosy-wm-switch omniwm | aerospace
@@ -21,10 +24,12 @@ EOF
 }
 
 WM_FLAG=
+WITH_YAZI=0
 for arg in "$@"; do
   case "$arg" in
     --aerospace) WM_FLAG=aerospace ;;
     --omniwm) WM_FLAG=omniwm ;;
+    --yazi) WITH_YAZI=1 ;;
     -h | --help) usage; exit 0 ;;
     *) printf 'install.sh: unknown option: %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
   esac
@@ -111,6 +116,18 @@ comm -13 <(printf '%s\n' "$PRE_FORMULAE") <(brew list --formula 2>/dev/null | so
   | while read -r f; do [ -n "$f" ] && mark "brew-formula $f"; done
 comm -13 <(printf '%s\n' "$PRE_CASKS") <(brew list --cask 2>/dev/null | sort) \
   | while read -r c; do [ -n "$c" ] && mark "brew-cask $c"; done
+
+# yazi is opt-in (--yazi): most users never ask for a second file manager.
+# Only what this Mac lacks is installed, and each is recorded, so
+# uninstall.sh takes away exactly that. Once yazi is here, Super+Shift+Y is
+# bound on every later run, flag or not.
+if [ "$WITH_YAZI" = 1 ]; then
+  log "Installing yazi and its preview helpers (--yazi)"
+  for f in yazi fd poppler resvg sevenzip; do
+    brew list --formula "$f" >/dev/null 2>&1 && continue
+    if brew install "$f"; then mark "brew-formula $f"; else log "WARNING: could not install $f"; fi
+  done
+fi
 
 # --- 2. Symlinks ------------------------------------------------------------
 # Existing non-symlink targets are backed up, never deleted. A
@@ -256,8 +273,11 @@ read_apps() {
 }
 read_apps "$REPO_DIR/config/apps.conf"
 read_apps "$REPO_DIR/config/apps.local.conf"
+# Super+Shift+Y is bound only where yazi is installed: an optional tool gets
+# no chord that can only fail. Installing it later takes a re-run.
+if command -v yazi >/dev/null 2>&1 || [ -x /opt/homebrew/bin/yazi ]; then YAZI_LINE='s|^#yazi# ||'; else YAZI_LINE='/^#yazi# /d'; fi
 sed -e "s|@TERMINAL@|$TERMINAL|g" -e "s|@BROWSER@|$BROWSER|g" \
-    -e "s|@MUSIC@|$MUSIC|g" -e "s|@MESSENGER@|$MESSENGER|g" \
+    -e "s|@MUSIC@|$MUSIC|g" -e "s|@MESSENGER@|$MESSENGER|g" -e "$YAZI_LINE" \
   "$REPO_DIR/config/aerospace/aerospace.template.toml" > "$REPO_DIR/config/aerospace/aerospace.toml"
 
 log "Linking configs"
@@ -454,6 +474,7 @@ link "$REPO_DIR/bin/theme-set"  "$HOME/.local/bin/theme-set"
 link "$REPO_DIR/bin/theme-next" "$HOME/.local/bin/theme-next"
 link "$REPO_DIR/bin/theme-bg-next" "$HOME/.local/bin/theme-bg-next"
 link "$REPO_DIR/bin/omacosy-toggle" "$HOME/.local/bin/omacosy-toggle"
+link "$REPO_DIR/bin/omacosy-files" "$HOME/.local/bin/omacosy-files"
 link "$REPO_DIR/bin/omacosy-ws" "$HOME/.local/bin/omacosy-ws"
 link "$REPO_DIR/bin/omacosy-focus-guard" "$HOME/.local/bin/omacosy-focus-guard"
 link "$REPO_DIR/bin/omacosy-ws-collapse" "$HOME/.local/bin/omacosy-ws-collapse"

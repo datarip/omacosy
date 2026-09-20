@@ -58,6 +58,8 @@ let EVENT_WINDOW_ORDER: UInt32 = 808
 let EVENT_WINDOW_VISIBILITY: UInt32 = 815
 let EVENT_WINDOW_CREATE: UInt32 = 1325
 let EVENT_WINDOW_DESTROY: UInt32 = 1326
+// a minimize begins: no window id in the payload, verified by probe
+let EVENT_WINDOW_MINIMIZE: UInt32 = 1327
 let EVENT_FRONT_CHANGE: UInt32 = 1508
 
 // styling from ~/.config/omacosy/borders.conf (width, radius, per-app
@@ -130,16 +132,32 @@ var lastFullScanAt = Date.distantPast
 // the flag clear and drags keep the shortcut.
 var focusMayHaveChanged = true
 
-// Close, quit and minimize fade a window out for ~250 ms before it leaves
-// the list. Fading means alpha below that window's own peak, so a window
-// that is always translucent still counts as present.
+// A window on its way out stays listed, on screen and pickable, so it has
+// to be recognised by HOW it goes.
+//
+// Close and quit fade it over ~250 ms: alpha falls below that window's own
+// peak, which leaves windows that are translucent by design alone.
+//
+// Minimize keeps it opaque and shrinks it into the Dock over ~380 ms.
+// Event 1327 says a minimize began, and its payload carries no window id,
+// so it cannot name the window — but the ringed window shrinking under 80%
+// of its own peak area in the second that follows can only be that one.
 var peakAlpha: [UInt32: Double] = [:]
-func fading(_ w: [String: Any]) -> Bool {
-    guard let n = w["kCGWindowNumber"] as? Int,
-        let a = (w["kCGWindowAlpha"] as? NSNumber)?.doubleValue else { return false }
-    let peak = max(peakAlpha[UInt32(n)] ?? 0, a)
-    peakAlpha[UInt32(n)] = peak
-    return a < peak * 0.9
+var peakArea: [UInt32: CGFloat] = [:]
+var minimizeAt = Date.distantPast
+func leaving(_ w: [String: Any]) -> Bool {
+    guard let n = w["kCGWindowNumber"] as? Int else { return false }
+    let wid = UInt32(n)
+    if let a = (w["kCGWindowAlpha"] as? NSNumber)?.doubleValue {
+        let peak = max(peakAlpha[wid] ?? 0, a)
+        peakAlpha[wid] = peak
+        if a < peak * 0.9 { return true }
+    }
+    guard let b = w["kCGWindowBounds"] as? [String: Any],
+        let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat else { return false }
+    let peak = max(peakArea[wid] ?? 0, wd * h)
+    peakArea[wid] = peak
+    return Date().timeIntervalSince(minimizeAt) < 1.0 && wd * h < peak * 0.8
 }
 
 // frontmost app's topmost normal window, in CG (top-left) coordinates
@@ -162,7 +180,7 @@ func focusedWindowFrame() -> (CGRect, String)? {
         let b = w["kCGWindowBounds"] as? [String: Any],
         let x = b["X"] as? CGFloat, let y = b["Y"] as? CGFloat,
         let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat,
-        wd > 60, h > 60, !fading(w) {
+        wd > 60, h > 60, !leaving(w) {
         return (CGRect(x: x, y: y, width: wd, height: h), name)
     }
     lastFullScanAt = now
@@ -175,7 +193,7 @@ func focusedWindowFrame() -> (CGRect, String)? {
             let b = w["kCGWindowBounds"] as? [String: Any],
             let x = b["X"] as? CGFloat, let y = b["Y"] as? CGFloat,
             let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat,
-            wd > 60, h > 60, !fading(w)
+            wd > 60, h > 60, !leaving(w)
         else { continue }
         let rect = CGRect(x: x, y: y, width: wd, height: h)
         // AeroSpace drags windows through offscreen stash positions
@@ -403,13 +421,13 @@ func hideRing(_ reason: String) {
     missSince = nil
 }
 
-// Hidden (Cmd+H) windows leave the on-screen list; closed and quit ones
-// fade, then leave the window list. Each makes the miss final.
+// Hidden (Cmd+H) windows leave the on-screen list; closed, quit and
+// minimized ones animate out first. Each makes the miss final.
 func ringedWindowGone() -> Bool {
     guard shownWid != 0 else { return false }
     guard let w = (CGWindowListCopyWindowInfo(.optionIncludingWindow, shownWid)
         as? [[String: Any]])?.first else { return true }
-    return (w["kCGWindowIsOnscreen"] as? Bool) != true || fading(w)
+    return (w["kCGWindowIsOnscreen"] as? Bool) != true || leaving(w)
 }
 
 // Storm handling (drags fire ~90 events/s): tick SYNCHRONOUSLY on the
@@ -649,12 +667,14 @@ func rebuildSubscriptions() {
     guard set != subscribed, !wids.isEmpty else { return }
     subscribed = set
     peakAlpha = peakAlpha.filter { set.contains($0.key) }
+    peakArea = peakArea.filter { set.contains($0.key) }
     _ = wids.withUnsafeBufferPointer {
         SLSRequestNotificationsForWindows(cid, $0.baseAddress!, Int32(wids.count))
     }
 }
 
 let slsCallback: NotifyProc = { event, _, _, _ in
+    if event == EVENT_WINDOW_MINIMIZE { minimizeAt = Date() }
     if event == EVENT_WINDOW_CREATE || event == EVENT_WINDOW_DESTROY {
         rebuildSubscriptions()
     }
@@ -668,7 +688,7 @@ let slsCallback: NotifyProc = { event, _, _, _ in
 
 for code in [EVENT_WINDOW_MOVE, EVENT_WINDOW_RESIZE, EVENT_WINDOW_ORDER,
              EVENT_WINDOW_VISIBILITY, EVENT_WINDOW_CREATE,
-             EVENT_WINDOW_DESTROY, EVENT_FRONT_CHANGE] {
+             EVENT_WINDOW_DESTROY, EVENT_WINDOW_MINIMIZE, EVENT_FRONT_CHANGE] {
     _ = SLSRegisterNotifyProc(slsCallback, code, nil)
 }
 rebuildSubscriptions()

@@ -7,6 +7,29 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
+usage() {
+  cat <<'EOF'
+usage: ./install.sh [--aerospace | --omniwm]
+
+  (no option)   keep the window manager this Mac runs; AeroSpace on a new Mac
+  --aerospace   install and run AeroSpace
+  --omniwm      install and run OmniWM; AeroSpace is not installed
+
+The other window manager installs on first use:
+  omacosy-wm-switch omniwm | aerospace
+EOF
+}
+
+WM_FLAG=
+for arg in "$@"; do
+  case "$arg" in
+    --aerospace) WM_FLAG=aerospace ;;
+    --omniwm) WM_FLAG=omniwm ;;
+    -h | --help) usage; exit 0 ;;
+    *) printf 'install.sh: unknown option: %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
 # --- 0. Manifest: record what THIS machine gains ----------------------------
 # uninstall.sh removes only what is recorded here, so tools and settings
 # the user had before omacosy are never touched. First run wins for
@@ -42,8 +65,12 @@ esac
 # AeroSpace beside OmniWM leaves two managers tiling the same windows.
 # OmniWM answering its socket covers a running session; the login item,
 # which omacosy-wm-switch moves on a confirmed switch, covers the rest.
+# A flag overrides both, and the login item then keeps it for re-runs.
 WM=aerospace
-if [ -d /Applications/OmniWM.app ]; then
+if [ -n "$WM_FLAG" ]; then
+  WM=$WM_FLAG
+  log "Window manager: $WM (from the command line)"
+elif [ -d /Applications/OmniWM.app ]; then
   if "$HOME/.local/bin/omacosy-omni" active >/dev/null 2>&1 \
      || osascript -e 'tell application "System Events" to exists login item "OmniWM"' 2>/dev/null | grep -qx true; then
     WM=omniwm
@@ -69,6 +96,9 @@ brew trust felixkratz/formulae 2>/dev/null || true
 log "Installing packages (brew bundle)"
 PRE_FORMULAE="$(brew list --formula 2>/dev/null | sort)"
 PRE_CASKS="$(brew list --cask 2>/dev/null | sort)"
+# the Brewfile installs only this window manager. Homebrew drops every
+# variable without the HOMEBREW_ prefix before it reads the Brewfile.
+export HOMEBREW_OMACOSY_WM=$WM
 # One package failing must not abort the install: the rest of the desktop
 # does not depend on it, and `set -e` would otherwise take a cask that
 # merely needs sudo to adopt an existing app and turn it into a dead stop.
@@ -491,22 +521,33 @@ fi
 # --- 7. Services ------------------------------------------------------------
 
 
-# OmniWM trial (this branch): installing NEVER switches the window
-# manager, in either direction — a half-configured switch once stranded
-# the user on one workspace with no way back. Moving between the two is
-# an explicit, dead-man-guarded step:
+# install.sh never hands a running session from one window manager to the
+# other itself — a half-configured switch once stranded the user on one
+# workspace with no way back. A flag that names the manager NOT running
+# calls the dead-man-guarded step instead:
 #
-#   omacosy-wm-switch omniwm      # snapshot, grant-first, auto-revert
+#   omacosy-wm-switch omniwm      # snapshot, check, auto-revert
 #   omacosy-wm-switch aerospace   # the way back
-if [ "$WM" = omniwm ]; then
-  log "Keeping OmniWM (back to AeroSpace with: omacosy-wm-switch aerospace)"
+if [ "$WM" = omniwm ] && pgrep -x AeroSpace >/dev/null; then
+  "$HOME/.local/bin/omacosy-wm-switch" omniwm \
+    || log "WARNING: still on AeroSpace; retry with: omacosy-wm-switch omniwm"
+elif [ "$WM" = aerospace ] && pgrep -x OmniWM >/dev/null; then
+  "$HOME/.local/bin/omacosy-wm-switch" aerospace \
+    || log "WARNING: still on OmniWM; retry with: omacosy-wm-switch aerospace"
+elif [ "$WM" = omniwm ]; then
+  log "Starting OmniWM (switch to AeroSpace with: omacosy-wm-switch aerospace)"
+  open -a OmniWM || log "WARNING: OmniWM is not installed; see the brew bundle output above"
+  # the login item starts OmniWM at login and marks it as the choice
+  osascript -e 'tell application "System Events"
+    if not (exists login item "OmniWM") then make new login item at end with properties {path:"/Applications/OmniWM.app", hidden:false}
+  end tell' >/dev/null 2>&1 || true
   # karabiner.json was copied from the repo above, which dropped the
   # rules for the chords that run commands: OmniWM's hotkeys cannot
   "$HOME/.local/bin/omacosy-karabiner-omniwm" install >/dev/null 2>&1 \
     || log "WARNING: could not restore the OmniWM chords; run: omacosy-karabiner-omniwm install"
 else
   log "Starting AeroSpace (switch to OmniWM with: omacosy-wm-switch omniwm)"
-  open -a AeroSpace
+  open -a AeroSpace || log "WARNING: AeroSpace is not installed; see the brew bundle output above"
   sleep 1
   "$(command -v aerospace || echo /opt/homebrew/bin/aerospace)" reload-config 2>/dev/null || true
 fi
@@ -522,10 +563,15 @@ else
   open -a Karabiner-Elements
 fi
 
-cat <<'EOF'
+if [ "$WM" = omniwm ]; then
+  GRANT="Grant OmniWM      System Settings -> Privacy & Security -> Accessibility"
+else
+  GRANT="Grant AeroSpace   System Settings -> Privacy & Security -> Accessibility"
+fi
+cat <<EOF
 
 Done. One-time macOS steps if this is a fresh machine:
-  1. Grant AeroSpace   System Settings -> Privacy & Security -> Accessibility
+  1. $GRANT
   2. Karabiner-Elements: approve its driver extension + Input Monitoring
      when prompted (System Settings -> Privacy & Security)
   3. Korren isn't in the Brewfile — build it from the korren repo:

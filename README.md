@@ -31,6 +31,11 @@ git clone https://github.com/paulsp94/omacosy.git ~/.local/share/omacosy &&
 cd ~/.local/share/omacosy && ./install.sh
 ```
 
+This installs AeroSpace. For [OmniWM](#two-window-managers-omniwm-option-beta)
+instead, run `./install.sh --omniwm`: AeroSpace is then not installed.
+A later `install.sh` or `omacosy-update` keeps the window manager you
+chose.
+
 The clone location matters. Configs are symlinked into the repo, and
 macOS privacy (TCC) blocks launchd services from reading `~/Documents`,
 `~/Desktop` and `~/Downloads`. If you clone there anyway, the installer
@@ -429,7 +434,8 @@ layout — omacosy can run on either, and switching is one command:
 ```sh
 omacosy-wm-switch omniwm      # installs OmniWM on first use, then
                               # switches with a guarded handover
-omacosy-wm-switch aerospace   # the way back
+omacosy-wm-switch aerospace   # the way back, and installs AeroSpace
+                              # on first use after ./install.sh --omniwm
 ```
 
 The switch is deliberately paranoid: it snapshots your windows, waits

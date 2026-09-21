@@ -2887,22 +2887,32 @@ func monitorIDs() -> [String: String] { // display name -> WM monitor id
     return map
 }
 
+// A label no window manager gave: unique per display, and it matches no
+// WM id, so the display's workspace pills stay empty until one answers.
+func unresolvedID(_ screen: NSScreen) -> String { "unresolved:\(screenID(screen))" }
+var resolveRetryPending = false
+
 func rebuildSurfaces() {
     let wm = omniwmActive() ? "omniwm" : "aerospace"
     let ids = monitorIDs()
     var kept: [BarSurface] = []
+    // One bar per display, always; the window manager only labels them. A
+    // manager that is not up yet (a login, a restart, a switch) must not
+    // take the bar away, so a display it does not list keeps its last label.
     for screen in NSScreen.screens {
-        guard let id = ids[screen.localizedName] else { continue }
-        if let existing = surfaces.first(where: { screenID($0.screen) == screenID(screen) }) {
+        let existing = surfaces.first(where: { screenID($0.screen) == screenID(screen) })
+        let id = ids[screen.localizedName] ?? existing?.monitorID ?? unresolvedID(screen)
+        let label = id.hasPrefix("unresolved:") ? "no window manager yet" : "\(wm) monitor \(id)"
+        if let existing {
             if existing.monitorID != id {
-                tlog("monitor: \(screen.localizedName) is now \(wm) monitor \(id) (was \(existing.monitorID))")
+                tlog("monitor: \(screen.localizedName) is now \(label) (was \(existing.monitorID))")
                 existing.monitorID = id
             }
             existing.screen = screen
             existing.place()
             kept.append(existing)
         } else {
-            tlog("surface: \(screen.localizedName) -> \(wm) monitor \(id)\(screen.safeAreaInsets.top > 0 ? " (notched)" : "")")
+            tlog("surface: \(screen.localizedName) -> \(label)\(screen.safeAreaInsets.top > 0 ? " (notched)" : "")")
             kept.append(BarSurface(screen: screen, monitorID: id))
         }
     }
@@ -2911,6 +2921,16 @@ func rebuildSurfaces() {
         gone.window.orderOut(nil)
     }
     surfaces = kept
+    // OmniWM starts without a launch notification (it is LSUIElement), so
+    // an unlabelled bar asks again until a window manager answers
+    if !resolveRetryPending, kept.contains(where: { $0.monitorID.hasPrefix("unresolved:") }) {
+        resolveRetryPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            resolveRetryPending = false
+            rebuildSurfaces()
+            kickRebuild()
+        }
+    }
 }
 
 func repaint() {
@@ -3626,7 +3646,7 @@ model.focused = omniwmActive()
         .trimmingCharacters(in: .whitespacesAndNewlines)
 rebuildSurfaces()
 guard !surfaces.isEmpty else {
-    FileHandle.standardError.write("omacosy-bar: no display matched \(omniwmActive() ? "an omniwm" : "an aerospace") monitor\n".data(using: .utf8)!)
+    FileHandle.standardError.write("omacosy-bar: no display\n".data(using: .utf8)!)
     exit(1)
 }
 apply(fetchSnapshot()) // blocking is fine here: the run loop has not started

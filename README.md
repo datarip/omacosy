@@ -544,7 +544,7 @@ copy of anything.
 ## Back to a normal Mac
 
 ```sh
-./uninstall.sh
+cd ~/.local/share/omacosy && ./uninstall.sh
 ```
 
 Manifest-driven: `install.sh` records what this machine actually gained
@@ -553,6 +553,19 @@ Manifest-driven: `install.sh` records what this machine actually gained
 exactly that. Tools and settings you had before omacosy are never
 touched. Pre-manifest installs fall back to a conservative teardown
 that leaves all Homebrew packages in place.
+
+After the script:
+
+1. Log out and back in. The native menu bar comes back fully only then.
+2. Delete the repo, which the script keeps:
+   `rm -rf ~/.local/share/omacosy`.
+3. Optional: in System Settings → Privacy & Security, delete the
+   Accessibility, Input Monitoring and Screen Recording entries that
+   omacosy added. No script can remove them. They do nothing once the
+   binaries are gone.
+
+To stop omacosy for a while without removing it, see
+[Parking the setup](#parking-the-setup).
 
 ## License & credits
 

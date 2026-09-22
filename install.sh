@@ -571,10 +571,13 @@ launchctl load "$HOME/Library/LaunchAgents/com.omacosy.gesture.plist" 2>/dev/nul
 # a rebuild strands the daemon in its permission-wait loop with no
 # visible symptom but dead swipes — check and say so out loud
 sleep 2
-if tail -5 /tmp/omacosy-gesture.log 2>/dev/null | grep -q "Waiting for accessibility"; then
-  log "WARNING: omacosy-gesture is waiting for its Accessibility grant"
-  log "  (a rebuild makes macOS treat it as a new app — this is a macOS rule, not a bug)."
-  log "  Fix: System Settings -> Privacy & Security -> Accessibility -> toggle omacosy-gesture"
+# (when the list below names omacosy-gesture, that list says what to do)
+if tail -5 /tmp/omacosy-gesture.log 2>/dev/null | grep -q "Waiting for accessibility" \
+   && case " $REGRANT " in *" omacosy-gesture "*) false ;; *) true ;; esac; then
+  log "WARNING: omacosy-gesture is waiting for its Accessibility grant."
+  log "  Switching its entry off and on does not help: quit System Settings,"
+  log "  reopen Privacy & Security -> Accessibility, remove omacosy-gesture"
+  log "  with the - button, then add it again with +."
 fi
 rm -rf "$DR_DIR"
 if [ -n "$REGRANT" ]; then

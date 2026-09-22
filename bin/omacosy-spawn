@@ -10,7 +10,7 @@
 # stamped it into the state file (its first field is the newest hinted
 # window id, and ids only grow) before letting the next spawn go.
 # Spam then becomes a rapid, clean sequence instead of a simultaneous
-# mess. Worst case the wait gives up after 2s so a broken hint chain
+# mess. Worst case the wait gives up after about 5 s so a broken hint chain
 # can never wedge the terminal key.
 APP="$1"
 [ -n "$APP" ] || exit 1
@@ -66,30 +66,34 @@ spawn_app() {
 # clears the lock immediately instead. The pid lands just after the
 # mkdir, so an empty one is re-read after a beat before it counts.
 #
-# The give-up timer is wall clock. The old one counted 120 sleeps of
-# 0.05 and called that 5 s; a turn really costs ~130 ms, so it did not
-# fire until 13 s. It also fell through and ran WITHOUT the lock while
-# its trap still removed whatever lock it found, including one another
-# spawn was holding. Releasing is now owner-checked, so falling through
-# is harmless.
+# The timers are wall clock. The old one counted 120 sleeps of 0.05 and
+# called that 5 s; a turn really costs ~130 ms, so it did not fire until
+# 13 s. It also fell through and ran WITHOUT the lock while its trap
+# still removed whatever lock it found, including one another spawn was
+# holding. Releasing is now owner-checked, so falling through is harmless.
+#
+# A LIVE holder is taken over only when its lock is over 15 s old: the
+# longest real hold is the 5 s AppleScript cap plus the 2 s window wait,
+# so before that the liveness check decides. The age is the lock's, not
+# the waiter's, so after one takeover the other waiters see a new lock
+# and wait for it instead of deleting it too. Every turn sleeps.
 LOCK="/tmp/omacosy-spawn-$(id -u).lock.d"
 read_owner() { owner=""; [ -r "$LOCK/pid" ] && read -r owner < "$LOCK/pid"; }
 trap 'read_owner; [ "$owner" = "$$" ] && rm -rf "$LOCK"' EXIT
-give_up=$(( SECONDS + 8 ))
-turns=0
+start=$SECONDS
 while :; do
   mkdir "$LOCK" 2>/dev/null && { echo $$ > "$LOCK/pid"; break; }
   read_owner
   [ -z "$owner" ] && { sleep 0.05; read_owner; }
-  stale=no
   case "$owner" in
-    ""|*[!0-9]*) stale=yes ;;
-    *) kill -0 "$owner" 2>/dev/null || stale=yes ;;
+    ""|*[!0-9]*) rm -rf "$LOCK" ;;
+    *) if ! kill -0 "$owner" 2>/dev/null; then
+         rm -rf "$LOCK"
+       elif [ $(( $(date +%s) - $(stat -f %m "$LOCK/pid" 2>/dev/null || date +%s) )) -ge 15 ]; then
+         rm -rf "$LOCK"
+       fi ;;
   esac
-  [ "$SECONDS" -ge "$give_up" ] && stale=yes
-  [ "$stale" = yes ] && { rm -rf "$LOCK"; continue; }
-  turns=$(( turns + 1 ))
-  [ "$turns" -gt 400 ] && break   # never wedge the key: go on unlocked
+  [ $(( SECONDS - start )) -ge 30 ] && break   # never wedge the key: go on unlocked
   sleep 0.05
 done
 
@@ -133,7 +137,11 @@ STATE="/tmp/omacosy-split-state-$(id -u)"
 prev=0
 [ -f "$STATE" ] && prev=$(cut -d' ' -f1 "$STATE")
 spawn_app "$APP"
-for _ in $(seq 40); do
+SECONDS_AT_SPAWN=$SECONDS
+# wall clock, as for the lock. The old 40 sleeps of 0.05 were documented
+# as 2 s and measured ~5 s; 5 s is what the tiling has been tuned against,
+# so it stays. SECONDS counts whole seconds: this ends 4 to 5 s after.
+until [ "$SECONDS" -ge $(( SECONDS_AT_SPAWN + 5 )) ]; do
   cur=0
   [ -f "$STATE" ] && cur=$(cut -d' ' -f1 "$STATE")
   [ "${cur%.*}" -gt "${prev%.*}" ] 2>/dev/null && exit 0

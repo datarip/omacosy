@@ -83,8 +83,17 @@ if [ -f "$MANIFEST" ] && grep -q '^default ' "$MANIFEST"; then
   while read -r _ domain key type value; do
     if [ "$type" = "ABSENT" ]; then
       defaults delete "$domain" "$key" 2>/dev/null || true
-    else
-      defaults write "$domain" "$key" "-$type" "$value" 2>/dev/null || true
+      continue
+    fi
+    # defaults read prints a boolean as 1 or 0, which is how it was
+    # recorded, but defaults write takes only words: 1 printed defaults'
+    # help text and restored nothing
+    if [ "$type" = boolean ]; then
+      case "$value" in 1) value=true ;; 0) value=false ;; esac
+    fi
+    if { [ -z "$value" ] && [ "$type" != string ]; } \
+       || ! defaults write "$domain" "$key" "-$type" "$value" >/dev/null 2>&1; then
+      log "Could not restore $domain $key (recorded: $type '$value'); check it in System Settings"
     fi
   done < <(grep '^default ' "$MANIFEST")
 else

@@ -13,6 +13,21 @@ log() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 MANIFEST="$HOME/.local/state/omacosy/manifest"
 have() { [ -f "$MANIFEST" ] && grep -qxF "$1" "$MANIFEST"; }
 
+# Copied first, before anything is removed, and named at the end: your
+# settings, the record of what omacosy installed, the karabiner.json it
+# wrote, and your own app choices in the clone.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP="$HOME/omacosy-backup-$(date +%Y%m%d-%H%M%S)"
+backup() { # <path> <name in the backup>
+  [ -e "$1" ] || return 0
+  mkdir -p "$BACKUP"
+  cp -R "$1" "$BACKUP/$2" 2>/dev/null || log "WARNING: could not back up $1"
+}
+backup "$HOME/.config/omacosy" config-omacosy
+backup "$HOME/.local/state/omacosy" state-omacosy
+backup "$HOME/.config/karabiner/karabiner.json" karabiner.json
+backup "$REPO_DIR/config/apps.local.conf" apps.local.conf
+
 # --- 1. Stop the stack ------------------------------------------------------
 # Quitting the window manager restores windows it was managing —
 # whichever of the two is running (the OmniWM trial branch may have
@@ -224,3 +239,13 @@ Done. Left in place on purpose:
     lists clean.
   - The repo itself and your shell tools (fzf, eza, zoxide, ...) are untouched.
 EOF
+
+if [ -d "$BACKUP" ]; then
+  echo
+  log "Your settings and the record of this install are saved in:"
+  log "  $BACKUP"
+fi
+# this window's shell still runs the setup omacosy installed, and the
+# prompt it draws with (starship) may just have been removed
+echo
+log "Open a new terminal window now: this one still uses omacosy's shell setup."

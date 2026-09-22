@@ -601,11 +601,6 @@ struct BarItem: Equatable {
 
 // screen order, left to right
 let rightOrder = ["weather", "wifi", "bluetooth", "brightness", "volume", "battery", "clock", "activity"]
-// Pills that are SQUARE when they carry an icon and nothing else, so the
-// two ends of the bar read as one shape with the apple pill. A label
-// still flows icon-then-text: the bluetooth count and "off" need the
-// room, and a square would clip them.
-let squarePills: Set<String> = ["wifi", "bluetooth", "activity"]
 var rightItems: [String: BarItem] = [:]
 
 func set(_ name: String, _ mutate: (inout BarItem) -> Void) {
@@ -2639,16 +2634,16 @@ final class BarView: NSView {
             let iconColor = item.iconColor ?? palette.label
             let hasIcon = !item.icon.isEmpty
             let hasLabel = !item.label.isEmpty
-            // An icon-only pill is sized and centred on the glyph's INK, so
-            // a lopsided side bearing cannot push it off centre. A pill with
-            // a label flows icon-then-text, and the gap between them exists
+            // An icon-only pill is a square, like the apple pill, with the
+            // glyph centred on its INK. A pill with a label flows
+            // icon-then-text, and the gap between them exists
             // only when both do — the weather pill has no icon (its glyph
             // lives in the label) and inherited the gap anyway, which is the
             // 7 px it sat right of centre by.
             let iconInk = hasIcon ? inkBox(item.icon, iconFont).width : 0
             let labelAdv = hasLabel ? advance(item.label, labelFont) : 0
             let innerGap: CGFloat = hasIcon && hasLabel ? 7 : 0
-            let square = squarePills.contains(name) && hasIcon && !hasLabel
+            let square = hasIcon && !hasLabel
             let width = square ? pillHeight : 10 + iconInk + innerGap + labelAdv + 10
             let pill = NSRect(x: cursor - width, y: (barHeight - pillHeight) / 2,
                               width: width, height: pillHeight)

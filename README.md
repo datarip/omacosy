@@ -89,6 +89,15 @@ enough: measured on macOS 26.3, an unbundled binary reads `nil` however
 it is authorised, which is why the bar ships inside a minimal `.app`.
 Refuse the grant and you lose the name, nothing else.
 
+More on **Screen Recording**, because the entry that counts is not the
+one you would expect. `omacosy-overview` takes the thumbnails, but macOS
+checks the permission of the program that started it, and never the
+overview's own entry (measured in macOS's permission log):
+`omacosy-gesture` when a four-finger swipe up opens it, and
+Karabiner-Elements (`Karabiner-Console-User-Server`) when Super+O opens it
+under OmniWM. Those are the entries to switch on. Under AeroSpace, Super+O
+does something else, and the swipe is the only way in.
+
 ### What it does not do
 
 - **No telemetry, no analytics, no crash reporting.** Nothing is sent

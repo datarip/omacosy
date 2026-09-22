@@ -92,11 +92,13 @@ omniwm)
   "$HOME/.local/bin/omacosy-karabiner-omniwm" install 2>/dev/null || true
   # omacosy-gesture comes BACK and owns ALL FOUR directions, because
   # OmniWM's own workspace swipe is off in settings.toml. Two engines on
-  # one four-finger gesture fought: OmniWM's fired on any horizontal
-  # component, so a diagonal swipe-up switched workspace AND opened the
-  # overview. omacosy-gesture commits a gesture to one axis and consumes
-  # horizontal flicks while the overlay is up, which is the behaviour
-  # AeroSpace already gets from the same code.
+  # one four-finger gesture fought. With workspaceSwipeFingerCount equal
+  # to fingerCount and scrolling on, OmniWM forces its swipe VERTICAL
+  # whatever workspaceSwipeAxis says, so a swipe up switched workspace
+  # under the overview omacosy-gesture opened. omacosy-gesture commits a
+  # gesture to one axis and consumes horizontal flicks while the overlay
+  # is up, which is the behaviour AeroSpace already gets from the same
+  # code.
   #
   # So do NOT blank swipe_left/swipe_right for OmniWM, whatever an older
   # comment here said: with OmniWM's handler off there would be no

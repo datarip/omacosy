@@ -3250,17 +3250,40 @@ for event in [NSWorkspace.didLaunchApplicationNotification,
     }
 }
 
+// the manager the bar's display labels came from
+var labelsFromOmniWM = omniwmActive()
+
+// OmniWM.app is LSUIElement, so NSWorkspace never posts didLaunch or
+// didTerminate for it and the WM observer above cannot see a switch. The
+// workspace-bar watch was therefore only ever established at startup,
+// which is why a bar restart was the only cure for pills frozen on the
+// other manager's state. Both calls are no-ops when the state agrees.
+func reconcileWM() {
+    let omni = omniwmActive()
+    if omni { startOmniWatch() } else { stopOmniWatch() }
+    // The bar's labels come from the manager that runs now: the two name the
+    // same display differently ("1" vs "display:1"), and events for a label
+    // no bar carries are dropped, so the workspace ring froze after a switch.
+    // The retries cover a manager that does not answer yet.
+    guard omni != labelsFromOmniWM else { return }
+    labelsFromOmniWM = omni
+    tlog("wm: now \(omni ? "omniwm" : "aerospace"), relabelling the bar")
+    for delay in [0.0, 1.0, 3.0, 8.0] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            rebuildSurfaces()
+            kickRebuild()
+        }
+    }
+}
+// on every app activation, and every 2 s for a switch that activates no
+// app (a move between empty workspaces); the check is an in-process lookup
+Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in reconcileWM() }
+
 // front app: a notification, not a poll and not a script
 NSWorkspace.shared.notificationCenter.addObserver(
     forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
 ) { note in
-    // OmniWM.app is LSUIElement, so NSWorkspace never posts didLaunch or
-    // didTerminate for it and the WM observer below cannot see a switch. The
-    // workspace-bar watch was therefore only ever established at startup,
-    // which is why a bar restart was the only cure for pills frozen on the
-    // other manager's state. Reconcile here instead: this fires on every app
-    // activation, and both calls are no-ops when the state already agrees.
-    if omniwmActive() { startOmniWatch() } else { stopOmniWatch() }
+    reconcileWM()
 
     let t0 = DispatchTime.now().uptimeNanoseconds
     guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,

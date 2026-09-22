@@ -214,9 +214,9 @@ Tahoe bug, most often poked by a Focus mode's menu-bar icon),
 
 ```sh
 omacosy-bar-autohide          # what it is set to now, and what that means
-omacosy-bar-autohide auto     # let the display decide (the default)
+omacosy-bar-autohide auto     # let the display decide
 omacosy-bar-autohide on       # hide at rest, give the height back
-omacosy-bar-autohide off      # always visible
+omacosy-bar-autohide off      # always visible (the default)
 ```
 
 `auto` reads the display. A notched panel keeps the bar visible, because

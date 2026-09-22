@@ -351,10 +351,10 @@ Screenshots, clipboard and app switching stay macOS's own
 (`Cmd+Shift+3/4/5`, `Cmd+C/V`, `Cmd+Tab`). `Alt+Tab` above is the
 *window*-scoped switcher macOS lacks.
 
-**The files key gives a new window every time.** `open ~` raises the Finder
-window you already have rather than making another, so the key could only
-ever produce one. `omacosy-finder-window` asks Finder for a *window*
-instead, which costs the Automation permission for Finder on first use. It
+**The files key gives a new window every time.** `open ~` makes a window
+only when no Finder window shows your home folder. After that it raises
+the one you have, so the key stops making new ones.
+`omacosy-finder-window` asks Finder for a *window* instead, which costs the Automation permission for Finder on first use. It
 spawns through `omacosy-spawn --cmd <command...>`, the same lock
 `Super+Enter` takes, so a burst of presses still splits one slot at a time
 instead of landing in one flat row. Finder will not draw a window below 474

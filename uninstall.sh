@@ -231,7 +231,9 @@ pick_keep() { # <label>... ; sets KEEP_IDX to the indexes kept
         done
         printf 'Keep:  %s\nRemove:%s\n' "${k:- (nothing)}" "${r:- (nothing)}" >/dev/tty
         ans=""
-        IFS= read -r -p "Continue? [y/N, n goes back to the list] " ans </dev/tty || ans=y
+        # asked on the terminal too, so it stays out of an output file
+        printf 'Continue? [y/N, n goes back to the list] ' >/dev/tty
+        IFS= read -r ans </dev/tty || ans=y
         case "$ans" in
           [yY]*) KEEP_IDX=""
                  for ((i = 0; i < n; i++)); do [ "${sel[i]}" = 1 ] && KEEP_IDX="$KEEP_IDX $i "; done

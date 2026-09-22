@@ -26,9 +26,13 @@ details are under [What's inside](#whats-inside).
 
 ## Fresh Mac
 
+The same command installs and reinstalls. It clones the repo, or updates
+the clone that is already there, then runs the installer:
+
 ```sh
-git clone https://github.com/paulsp94/omacosy.git ~/.local/share/omacosy &&
-cd ~/.local/share/omacosy && ./install.sh
+d=~/.local/share/omacosy
+if [ -d "$d/.git" ]; then git -C "$d" pull --ff-only; else git clone https://github.com/paulsp94/omacosy.git "$d"; fi &&
+cd "$d" && ./install.sh
 ```
 
 The clone location matters. Configs are symlinked into the repo, and

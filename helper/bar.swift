@@ -595,7 +595,9 @@ func spotify(_ command: String) {
 struct BarItem: Equatable {
     var icon = ""
     var label = ""
-    var iconColor: NSColor?
+    // which palette colour, not a copy of it: read when drawing, so a
+    // theme switch recolours every pill in the repaint it already does
+    var iconColor: KeyPath<Palette, NSColor>?
     var drawing = true
 }
 
@@ -648,15 +650,15 @@ func updateBattery() {
         let pct = max > 0 ? Int((Double(cur) / Double(max) * 100).rounded()) : cur
         let charging = (d[kIOPSPowerSourceStateKey] as? String) == kIOPSACPowerValue
         // same thresholds and glyphs the bar already uses
-        var icon = "󰂃", color = palette.red
+        var icon = "󰂃", color: KeyPath<Palette, NSColor> = \.red
         switch pct {
-        case 90...: icon = "󰁹"; color = palette.green
-        case 60..<90: icon = "󰂀"; color = palette.label
-        case 30..<60: icon = "󰁾"; color = palette.label
-        case 10..<30: icon = "󰁻"; color = palette.yellow
+        case 90...: icon = "󰁹"; color = \.green
+        case 60..<90: icon = "󰂀"; color = \.label
+        case 30..<60: icon = "󰁾"; color = \.label
+        case 10..<30: icon = "󰁻"; color = \.yellow
         default: break
         }
-        if charging { icon = "󰂄"; color = palette.green }
+        if charging { icon = "󰂄"; color = \.green }
         set("battery") { $0.icon = icon; $0.iconColor = color; $0.label = "\(pct)%" }
         return
     }
@@ -852,7 +854,7 @@ func updateBrightness() {
         set("brightness") {
             $0.drawing = true
             $0.icon = "\u{F0594}"
-            $0.iconColor = palette.muted
+            $0.iconColor = \.muted
             $0.label = "−\(Int((shade * 100).rounded()))%"
         }
         return
@@ -2629,7 +2631,7 @@ final class BarView: NSView {
             guard let item = rightItems[name], item.drawing,
                   !(item.icon.isEmpty && item.label.isEmpty) else { continue }
             let labelFont = chipFont
-            let iconColor = item.iconColor ?? palette.label
+            let iconColor = item.iconColor.map { palette[keyPath: $0] } ?? palette.label
             let hasIcon = !item.icon.isEmpty
             let hasLabel = !item.label.isEmpty
             // An icon-only pill is sized and centred on the glyph's INK, so
@@ -3415,16 +3417,6 @@ watch(FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".config/omarchy/current").path, create: false) {
     let t0 = DispatchTime.now().uptimeNanoseconds
     palette = loadPalette()
-    // The activity chip is the one right-hand item built ONCE at startup
-    // instead of by an updater, so its colour was copied out of the palette
-    // then and nothing ever refreshed it. Every other item is rewritten by
-    // its own updater — battery, wifi, clock — and picks the new accent up on
-    // its next tick. This one kept the accent of whatever theme was current
-    // when the bar started, so after a theme switch it sat in the old colour
-    // while the Apple logo and the app name moved to the new one.
-    // set() compares before it repaints, so re-applying an unchanged accent
-    // costs nothing.
-    set("activity") { $0.iconColor = palette.accent }
     iconCache.removeAll()
     repaint()
     if cheatWindow != nil { hideCheatsheet(); toggleCheatsheet() } // repaint in the new palette
@@ -3606,7 +3598,7 @@ guard !surfaces.isEmpty else {
     exit(1)
 }
 apply(fetchSnapshot()) // blocking is fine here: the run loop has not started
-rightItems["activity"] = BarItem(icon: "󰍛", iconColor: palette.accent)
+rightItems["activity"] = BarItem(icon: "󰍛", iconColor: \.accent)
 applyShade() // restore the level this machine was left at
 updateBattery()
 updateBrightness()

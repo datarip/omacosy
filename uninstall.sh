@@ -192,12 +192,28 @@ fi
 # --- 5. Homebrew packages omacosy itself installed --------------------------
 # Only packages the manifest says brew bundle ADDED on this machine —
 # anything the user had before is untouched.
+# One package at a time, with brew's errors shown: they were hidden, so a
+# cask that failed to uninstall left no trace (on one Mac, none went).
+# brew runs on this terminal, where a cask can ask for your password.
 if [ -f "$MANIFEST" ] && grep -qE '^brew-(formula|cask) ' "$MANIFEST"; then
   log "Removing Homebrew packages omacosy installed (pre-existing ones stay)"
-  grep '^brew-formula ' "$MANIFEST" | awk '{print $2}' \
-    | xargs -n1 brew uninstall 2>/dev/null || true
-  grep '^brew-cask ' "$MANIFEST" | awk '{print $2}' \
-    | xargs -n1 brew uninstall --cask 2>/dev/null || true
+  FAILED=""
+  FORMULAE="$(grep '^brew-formula ' "$MANIFEST" | awk '{print $2}')"
+  # twice: brew refuses a formula another one still needs, until that one
+  # is gone, so only the second pass shows what really stays
+  for f in $FORMULAE; do
+    brew list --formula "$f" >/dev/null 2>&1 && brew uninstall "$f" >/dev/null 2>&1
+  done
+  for f in $FORMULAE; do
+    brew list --formula "$f" >/dev/null 2>&1 || continue
+    brew uninstall "$f" || FAILED="$FAILED $f"
+  done
+  for c in $(grep '^brew-cask ' "$MANIFEST" | awk '{print $2}'); do
+    brew list --cask "$c" >/dev/null 2>&1 || continue
+    brew uninstall --cask "$c" || FAILED="$FAILED $c"
+  done
+  [ -z "$FAILED" ] \
+    || log "WARNING: could not remove:$FAILED (see the messages above)"
 fi
 if have "installed-homebrew"; then
   echo "Note: Homebrew itself was installed by omacosy; remove it with the"

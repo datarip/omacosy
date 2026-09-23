@@ -84,7 +84,7 @@ grant hide themselves rather than half-work.
 |---|---|---|---|
 | **Accessibility** | AeroSpace *or* OmniWM, `omacosy-gesture`, `omacosy-bar` (reads the focused app's menus for the app-pill popup), `omacosy-ffm` (AeroSpace mode only) | Move, resize and focus other apps' windows. This is the tiling itself, and it is the broadest permission here. | Nothing tiles. Not optional in practice. |
 | **Input Monitoring** | Karabiner-Elements, `omacosy-gesture` (and OmniWM, under that option) | Karabiner reads keys to remap Caps Lock; `omacosy-gesture` reads raw trackpad contacts, because macOS 26 stopped carrying touch data in normal events. | No Super key, no swipe gestures. |
-| **Screen Recording** | `omacosy-overview` | Captures a thumbnail per window for the overview cards, including windows the window manager has stashed offscreen. A screenshot of the visible screen could not see those. | Cards fall back to app icons and titles. |
+| **Screen Recording** | the program that first starts `omacosy-overview` ([see below](#permissions)) | Captures a thumbnail per window for the overview cards, including windows the window manager has stashed offscreen. A screenshot of the visible screen could not see those. | Cards fall back to app icons and titles. |
 | **Bluetooth** | `omacosy-bar` | Reads adapter power and the paired-device list for the bluetooth pill and its menu. | The pill hides itself. |
 | **Location** | `omacosy-bar` | Reads **only** the wi-fi network's name, which macOS classes as location data. No coordinate is ever requested; the authorisation itself is what unlocks `CWInterface.ssid()`. | The wi-fi popup's title row reads "wi-fi" instead of your network's name. Everything else is unaffected. |
 | **Automation** | `omacosy-bar`, `theme-set` | Apple Events to **Spotify** (what is playing; play/pause/next from the media pill) and to **System Events** (sleep, lock and restart from the Apple menu; setting the wallpaper). | The media pill hides; those menu rows do nothing. |
@@ -97,6 +97,18 @@ no location updates. Two things are required and neither alone is
 enough: measured on macOS 26.3, an unbundled binary reads `nil` however
 it is authorised, which is why the bar ships inside a minimal `.app`.
 Refuse the grant and you lose the name, nothing else.
+
+More on **Screen Recording**, because the entry that counts is not the
+one you would expect. `omacosy-overview` takes the thumbnails, but it keeps
+running in the background after it first opens, and macOS holds the program
+that started it that first time responsible for every later opening too.
+Observed in macOS's permission log on macOS 27.2, with the overview started
+fresh each time: `omacosy-gesture` when a four-finger swipe up started it,
+Karabiner-Elements (`Karabiner-Console-User-Server`) when Super+O started it
+under OmniWM, and the overview's own entry not consulted. Those are the
+entries to switch on. An overview first started from a terminal answers to
+that terminal's entry until it stops. Under AeroSpace, Super+O does
+something else, and the swipe is the only way in.
 
 ### What it does not do
 

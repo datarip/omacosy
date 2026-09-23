@@ -60,6 +60,11 @@ let EVENT_WINDOW_CREATE: UInt32 = 1325
 let EVENT_WINDOW_DESTROY: UInt32 = 1326
 // a minimize begins: no window id in the payload, verified by probe
 let EVENT_WINDOW_MINIMIZE: UInt32 = 1327
+// Both name the window in their payload. 816 fires as a window leaves the
+// screen (hide, quit, the end of a close fade or of a minimize); 804 as it
+// is removed (close, quit). Measured with docs/probes/ring-events.swift.
+let EVENT_WINDOW_OFFSCREEN: UInt32 = 816
+let EVENT_WINDOW_REMOVED: UInt32 = 804
 let EVENT_FRONT_CHANGE: UInt32 = 1508
 
 // styling from ~/.config/omacosy/borders.conf (width, radius, per-app
@@ -138,26 +143,16 @@ var focusMayHaveChanged = true
 // Close and quit fade it over ~250 ms: alpha falls below that window's own
 // peak, which leaves windows that are translucent by design alone.
 //
-// Minimize keeps it opaque and shrinks it into the Dock over ~380 ms.
-// Event 1327 says a minimize began, and its payload carries no window id,
-// so it cannot name the window — but the ringed window shrinking under 80%
-// of its own peak area in the second that follows can only be that one.
+// Minimize keeps it opaque and shrinks it into the Dock; event 1327 marks
+// its start (see minimizeBegan).
 var peakAlpha: [UInt32: Double] = [:]
-var peakArea: [UInt32: CGFloat] = [:]
-var minimizeAt = Date.distantPast
 func leaving(_ w: [String: Any]) -> Bool {
-    guard let n = w["kCGWindowNumber"] as? Int else { return false }
+    guard let n = w["kCGWindowNumber"] as? Int,
+        let a = (w["kCGWindowAlpha"] as? NSNumber)?.doubleValue else { return false }
     let wid = UInt32(n)
-    if let a = (w["kCGWindowAlpha"] as? NSNumber)?.doubleValue {
-        let peak = max(peakAlpha[wid] ?? 0, a)
-        peakAlpha[wid] = peak
-        if a < peak * 0.9 { return true }
-    }
-    guard let b = w["kCGWindowBounds"] as? [String: Any],
-        let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat else { return false }
-    let peak = max(peakArea[wid] ?? 0, wd * h)
-    peakArea[wid] = peak
-    return Date().timeIntervalSince(minimizeAt) < 1.0 && wd * h < peak * 0.8
+    let peak = max(peakAlpha[wid] ?? 0, a)
+    peakAlpha[wid] = peak
+    return a < peak * 0.9
 }
 
 // frontmost app's topmost normal window, in CG (top-left) coordinates
@@ -427,7 +422,7 @@ func ringedWindowGone() -> Bool {
     guard shownWid != 0 else { return false }
     guard let w = (CGWindowListCopyWindowInfo(.optionIncludingWindow, shownWid)
         as? [[String: Any]])?.first else { return true }
-    return (w["kCGWindowIsOnscreen"] as? Bool) != true || leaving(w)
+    return leaving(w)
 }
 
 // Storm handling (drags fire ~90 events/s): tick SYNCHRONOUSLY on the
@@ -667,14 +662,48 @@ func rebuildSubscriptions() {
     guard set != subscribed, !wids.isEmpty else { return }
     subscribed = set
     peakAlpha = peakAlpha.filter { set.contains($0.key) }
-    peakArea = peakArea.filter { set.contains($0.key) }
     _ = wids.withUnsafeBufferPointer {
         SLSRequestNotificationsForWindows(cid, $0.baseAddress!, Int32(wids.count))
     }
 }
 
-let slsCallback: NotifyProc = { event, _, _, _ in
-    if event == EVENT_WINDOW_MINIMIZE { minimizeAt = Date() }
+// The window a leave event names, from its payload: the first word for
+// 804 and 816, the third for 1326 ("1, 0, wid").
+func windowNamed(by event: UInt32, _ data: UnsafeMutableRawPointer?, _ len: Int) -> UInt32? {
+    guard let d = data else { return nil }
+    let at = event == EVENT_WINDOW_DESTROY ? 8 : 0
+    guard len >= at + 4 else { return nil }
+    return d.load(fromByteOffset: at, as: UInt32.self)
+}
+// 1327's payload names the animation, not the window. The ringed window is
+// the one Cmd+M and the Dock act on, so watch whether IT shrinks, every
+// 20 ms for at most 0.7 s: the genie starts some 150-400 ms after the event.
+// A neighbour that AeroSpace retiles is never looked at.
+func minimizeBegan() {
+    let wid = shownWid
+    guard wid != 0, let a0 = windowArea(wid) else { return }
+    let started = Date()
+    func check() {
+        guard win.isVisible, shownWid == wid else { return }
+        if (windowArea(wid) ?? 0) < a0 * 0.8 { hideRing("minimize"); syncShroud(nil); return }
+        guard Date().timeIntervalSince(started) < 0.7 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: check)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: check)
+}
+func windowArea(_ wid: UInt32) -> CGFloat? {
+    guard let w = (CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]])?.first,
+        let b = w["kCGWindowBounds"] as? [String: Any],
+        let wd = b["Width"] as? CGFloat, let h = b["Height"] as? CGFloat else { return nil }
+    return wd * h
+}
+let slsCallback: NotifyProc = { event, data, len, _ in
+    if event == EVENT_WINDOW_MINIMIZE { minimizeBegan() }
+    if [EVENT_WINDOW_OFFSCREEN, EVENT_WINDOW_REMOVED, EVENT_WINDOW_DESTROY].contains(event),
+        win.isVisible, shownWid != 0, windowNamed(by: event, data, len) == shownWid {
+        hideRing("event-gone")
+        syncShroud(nil)
+    }
     if event == EVENT_WINDOW_CREATE || event == EVENT_WINDOW_DESTROY {
         rebuildSubscriptions()
     }
@@ -688,7 +717,8 @@ let slsCallback: NotifyProc = { event, _, _, _ in
 
 for code in [EVENT_WINDOW_MOVE, EVENT_WINDOW_RESIZE, EVENT_WINDOW_ORDER,
              EVENT_WINDOW_VISIBILITY, EVENT_WINDOW_CREATE,
-             EVENT_WINDOW_DESTROY, EVENT_WINDOW_MINIMIZE, EVENT_FRONT_CHANGE] {
+             EVENT_WINDOW_DESTROY, EVENT_WINDOW_MINIMIZE, EVENT_FRONT_CHANGE,
+             EVENT_WINDOW_OFFSCREEN, EVENT_WINDOW_REMOVED] {
     _ = SLSRegisterNotifyProc(slsCallback, code, nil)
 }
 rebuildSubscriptions()
@@ -712,18 +742,32 @@ if SLSGetEventPort(cid, &eventPort).rawValue == 0,
 // this connection nothing while it does, so the ring sat at full colour
 // on a window that was visibly going. Re-read the ringed window alone
 // (one window id, ~0.1 ms) often enough that no fade outlives it.
-let ringWatch = Timer(timeInterval: 0.05, repeats: true) { _ in
-    guard win.isVisible, ringedWindowGone() else { return }
-    hideRing("window-gone")
-    syncShroud(nil)
+// Armed only while someone has used the keyboard or mouse in the last five
+// minutes: a close is a key press or a click, and away from the Mac the
+// daemon wakes only for its heartbeat. HID input age needs no permission;
+// the heartbeat arms and disarms.
+let activeFor: Double = 300
+var ringWatch: Timer?
+func armRingWatch() {
+    let idle = CGEventSource.secondsSinceLastEventType(.hidSystemState,
+        eventType: CGEventType(rawValue: ~0)!)
+    guard win.isVisible, idle < activeFor else { ringWatch?.invalidate(); ringWatch = nil; return }
+    guard ringWatch == nil else { return }
+    let t = Timer(timeInterval: 0.05, repeats: true) { _ in
+        guard win.isVisible, ringedWindowGone() else { return }
+        hideRing("window-gone")
+        syncShroud(nil)
+    }
+    RunLoop.current.add(t, forMode: .common)
+    ringWatch = t
 }
-RunLoop.current.add(ringWatch, forMode: .common)
 
 // safety net for anything eventless (subscription races, missed
 // events): cheap at this cadence, and the only whole-list poll
 let timer = Timer(timeInterval: 0.5, repeats: true) { _ in
     rebuildSubscriptions()
     tick()
+    armRingWatch()
 }
 RunLoop.current.add(timer, forMode: .common)
 

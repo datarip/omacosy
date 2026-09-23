@@ -2558,7 +2558,9 @@ final class BarView: NSView {
         // apple pill: the system menu the hidden native menu bar carried
         let appleGlyph = "\u{f179}"
         let appleFont = nerdFont("Bold", 15)
-        let appleW = inkBox(appleGlyph, appleFont).width + 20
+        // A square, like the icon-only pills at the other end. The left
+        // edge stays at padLeft, so only the inner edge moves.
+        let appleW = pillHeight
         let apple = NSRect(x: padLeft, y: (barHeight - pillHeight) / 2, width: appleW, height: pillHeight)
         palette.itemBG.setFill()
         NSBezierPath(roundedRect: apple, xRadius: radius, yRadius: radius).fill()
@@ -2634,24 +2636,26 @@ final class BarView: NSView {
             let iconColor = item.iconColor.map { palette[keyPath: $0] } ?? palette.label
             let hasIcon = !item.icon.isEmpty
             let hasLabel = !item.label.isEmpty
-            // An icon-only pill is sized and centred on the glyph's INK, so
-            // a lopsided side bearing cannot push it off centre. A pill with
-            // a label flows icon-then-text, and the gap between them exists
+            // An icon-only pill is a square, like the apple pill, with the
+            // glyph centred on its INK. A pill with a label flows
+            // icon-then-text, and the gap between them exists
             // only when both do — the weather pill has no icon (its glyph
             // lives in the label) and inherited the gap anyway, which is the
             // 7 px it sat right of centre by.
             let iconInk = hasIcon ? inkBox(item.icon, iconFont).width : 0
             let labelAdv = hasLabel ? advance(item.label, labelFont) : 0
             let innerGap: CGFloat = hasIcon && hasLabel ? 7 : 0
-            let width = 10 + iconInk + innerGap + labelAdv + 10
+            let square = hasIcon && !hasLabel
+            let width = square ? pillHeight : 10 + iconInk + innerGap + labelAdv + 10
             let pill = NSRect(x: cursor - width, y: (barHeight - pillHeight) / 2,
                               width: width, height: pillHeight)
             palette.itemBG.setFill()
             NSBezierPath(roundedRect: pill, xRadius: radius, yRadius: radius).fill()
             if hasIcon {
                 drawIcon(item.icon, iconFont, iconColor,
-                         centeredIn: NSRect(x: pill.minX + 10, y: pill.minY,
-                                            width: iconInk, height: pill.height))
+                         centeredIn: square ? pill
+                             : NSRect(x: pill.minX + 10, y: pill.minY,
+                                      width: iconInk, height: pill.height))
             }
             if hasLabel {
                 drawText(item.label, labelFont, palette.label,

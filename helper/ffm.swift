@@ -255,9 +255,19 @@ let overlayFlag = "/tmp/omacosy-overlay-active-\(getuid())"
 // starts this agent at every login whichever manager runs, so it stands
 // down by itself while OmniWM runs, however it was started.
 let omniwmBundleID = "com.barut.OmniWM"
+// Cached for 0.5 s, as in borders.swift: process() runs up to ~25 times a
+// second while the mouse moves, and the lookup walks every running app.
+var omniwmCached = false
+var omniwmCheckedAt = Date.distantPast
+func omniwmRunning() -> Bool {
+    if Date().timeIntervalSince(omniwmCheckedAt) < 0.5 { return omniwmCached }
+    omniwmCheckedAt = Date()
+    omniwmCached = !NSRunningApplication.runningApplications(withBundleIdentifier: omniwmBundleID).isEmpty
+    return omniwmCached
+}
 
 func process(confirmed: Bool) {
-    if !NSRunningApplication.runningApplications(withBundleIdentifier: omniwmBundleID).isEmpty {
+    if omniwmRunning() {
         pendingKey = ""
         dwellWork?.cancel()
         return

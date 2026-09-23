@@ -9,6 +9,56 @@
 #include <string.h>
 #include <unistd.h>
 
+// The focused window's id and frame; id is "" when none is focused.
+static void focused_window(omniwm* c, char* id, size_t idlen, double frame[4])
+{
+	id[0] = 0;
+	frame[0] = frame[1] = frame[2] = frame[3] = -1;
+	char* r = omniwm_request(c, "query", "{\"name\":\"focused-window\",\"selectors\":{},\"fields\":[]}");
+	if (!r) return;
+	yyjson_doc* d = yyjson_read(r, strlen(r), 0);
+	if (d) {
+		yyjson_val* w = yyjson_obj_get(omniwm_payload_of(d), "window");
+		const char* s = yyjson_get_str(yyjson_obj_get(w, "id"));
+		if (s) snprintf(id, idlen, "%s", s);
+		yyjson_val* f = yyjson_obj_get(w, "frame");
+		if (f) {
+			frame[0] = yyjson_get_num(yyjson_obj_get(f, "x"));
+			frame[1] = yyjson_get_num(yyjson_obj_get(f, "y"));
+			frame[2] = yyjson_get_num(yyjson_obj_get(f, "width"));
+			frame[3] = yyjson_get_num(yyjson_obj_get(f, "height"));
+		}
+		yyjson_doc_free(d);
+	}
+	free(r);
+}
+
+// Is window <id> in macOS's own fullscreen? OmniWM lists it with
+// layout-reason "native-fullscreen"; focused-window has no field for it.
+static int native_fullscreen(omniwm* c, const char* id)
+{
+	int yes = 0;
+	char* r = omniwm_request(c, "query",
+		"{\"name\":\"windows\",\"selectors\":{},\"fields\":[\"id\",\"layout-reason\"]}");
+	if (!r) return 0;
+	yyjson_doc* d = yyjson_read(r, strlen(r), 0);
+	if (d) {
+		yyjson_val* list = yyjson_obj_get(omniwm_payload_of(d), "windows");
+		size_t i, n;
+		yyjson_val* w;
+		yyjson_arr_foreach(list, i, n, w) {
+			const char* why = yyjson_get_str(yyjson_obj_get(w, "layoutReason"));
+			const char* wid = yyjson_get_str(yyjson_obj_get(w, "id"));
+			if (!wid || strcmp(wid, id)) continue;
+			yes = why && !strcmp(why, "native-fullscreen");
+			break;
+		}
+		yyjson_doc_free(d);
+	}
+	free(r);
+	return yes;
+}
+
 static int usage(void)
 {
 	fprintf(stderr,
@@ -18,7 +68,8 @@ static int usage(void)
 		"       omacosy-omni preselect-for-focused [mult]   (down/right by aspect)\n"
 		"       omacosy-omni slot <1-9> [move]               (cursor display's set)\n"
 		"       omacosy-omni focus-window <window-id>\n"
-		"       omacosy-omni window-count | wait-window <baseline> [timeout-ms]\n");
+		"       omacosy-omni window-count | wait-window <baseline> [timeout-ms]\n"
+		"       omacosy-omni focused-id | wait-settled <old-id> [timeout-ms]\n");
 	return 3;
 }
 
@@ -143,6 +194,50 @@ int main(int argc, char** argv)
 	} else if (!strcmp(op, "window-count")) {
 		int n = omniwm_window_count(c);
 		if (n >= 0) printf("%d\n", n); else rc = 1;
+	} else if (!strcmp(op, "focused-id")) {
+		char id[256];
+		double f[4];
+		focused_window(c, id, sizeof id, f);
+		if (id[0]) printf("%s\n", id); else rc = 1;
+	} else if (!strcmp(op, "wait-settled") && argc > 2) {
+		// The spawn lock's release condition. Focus has moved off <old-id>
+		// to the new window, and OmniWM has put that window in its tile:
+		// its frame changed at least once since it first appeared (a new
+		// window first sits still where the app placed it, so "the same
+		// twice" alone can mean "not tiled yet"), then reads the same twice,
+		// 30 ms apart. A window that never moves counts after 400 ms still.
+		int timeout = argc > 3 ? atoi(argv[3]) : 1500;
+		char id[256], newid[256] = "";
+		double f[4], first[4], lf[4];
+		int moved = 0, still = 0;
+		rc = 1;
+		// Nothing to settle, so no wait: pressed from a window in macOS's own
+		// fullscreen (each new window opens in a Space of its own, with no
+		// tile); or no window has OmniWM's focus 500 ms in, which is where
+		// the next press from such a Space starts. On an empty workspace the
+		// first window takes focus well inside that (140-320 ms measured).
+		if (native_fullscreen(c, argv[2])) { rc = 0; timeout = -1; }
+		int unfocused = 0;
+		for (int waited = 0; waited <= timeout; waited += 30) {
+			focused_window(c, id, sizeof id, f);
+			unfocused = id[0] ? 0 : unfocused + 30;
+			if (unfocused >= 500) { rc = 0; break; }
+			if (id[0] && strcmp(id, argv[2]) && f[2] > 0) {
+				if (strcmp(id, newid)) { // a new window took focus: start over on it
+					snprintf(newid, sizeof newid, "%s", id);
+					memcpy(first, f, sizeof f);
+					memcpy(lf, f, sizeof f);
+					moved = 0;
+					still = 0;
+				} else {
+					if (memcmp(f, first, sizeof f)) moved = 1;
+					still = memcmp(f, lf, sizeof f) ? 0 : still + 30;
+					memcpy(lf, f, sizeof f);
+					if ((moved && still >= 30) || still >= 400) { rc = 0; break; }
+				}
+			}
+			usleep(30000);
+		}
 	} else if (!strcmp(op, "preselect-for-focused")) {
 		// OmniWM's own orientation rule on the focused tile:
 		// height * multiplier > width -> vertical split -> new goes below

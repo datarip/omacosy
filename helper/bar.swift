@@ -4034,10 +4034,14 @@ func pointerAtScreenTop() {
     // just climbed out from under a fullscreen window has nothing to stand
     // aside from, and yielding would put it straight back under.
     //
-    // `|| surface.yielded` keeps asking after the pointer has left the band,
+    // `|| other.yielded` keeps asking after the pointer has left the band,
     // which is how a bar that stood aside comes back.
-    if !surface.autohide, !surface.revealed, fromTop <= yieldWatch || surface.yielded {
-        followNativeBar(surface)
+    //
+    // Every display's bar asks, not only the one under the pointer: a hover
+    // on one display can bring the native bar down on another as well.
+    for other in surfaces where !other.autohide && !other.revealed
+        && (fromTop <= yieldWatch || other.yielded) {
+        followNativeBar(other)
     }
 }
 

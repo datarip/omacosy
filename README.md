@@ -41,7 +41,8 @@ A later `install.sh` or `omacosy-update` keeps the window manager you
 chose.
 
 `./install.sh --yazi` also installs yazi, an optional file manager on
-`Super+Shift+Y`. It is off by default; see [the tool table](#whats-inside).
+`Super+Shift+Y`; `--yazi-full` adds its video and raw-photo previews. Both
+are off by default; see [the tool table](#whats-inside).
 
 The clone location matters. Configs are symlinked into the repo, and
 macOS privacy (TCC) blocks launchd services from reading `~/Documents`,
@@ -181,7 +182,7 @@ Your personal shell config belongs in `~/.zshrc.local`; the repo's
 | Prompt | starship | `config/starship.toml` |
 | Shell | zsh | `zsh/zshrc` + your `~/.zshrc.local` |
 | CLI stack | fzf, eza, zoxide, ripgrep, bat, lazygit, btop | wired in `zsh/zshrc` |
-| Files, opt-in | yazi on `Super+shift+y`, in a Ghostty window. `./install.sh --yazi` installs it with `fd`, `poppler`, `resvg` and `sevenzip` for search and previews; without the flag nothing is installed and the key stays unbound | `bin/omacosy-files` |
+| Files, opt-in | yazi on `Super+shift+y`, in a Ghostty window. `./install.sh --yazi` installs it with `fd`, `poppler`, `resvg` and `sevenzip` for search and previews; `--yazi-full` adds `ffmpeg-full` and `imagemagick-full` for video thumbnails and raw photos (large). Without either flag nothing is installed and the key stays unbound | `bin/omacosy-files` |
 
 Why so much of it is self-built:
 

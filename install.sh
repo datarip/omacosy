@@ -9,14 +9,18 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 usage() {
   cat <<'EOF'
-usage: ./install.sh [--aerospace | --omniwm] [--yazi]
+usage: ./install.sh [--aerospace | --omniwm] [--yazi | --yazi-full]
 
   (no option)   keep the window manager this Mac runs; AeroSpace on a new Mac
   --aerospace   install and run AeroSpace
   --omniwm      install and run OmniWM; AeroSpace is not installed
   --yazi        also install yazi, a file manager on Super+Shift+Y, with the
                 helpers it previews and searches with (fd, poppler, resvg,
-                sevenzip). Off by default; uninstall.sh removes what it added.
+                sevenzip)
+  --yazi-full   the same, plus ffmpeg-full and imagemagick-full for video
+                thumbnails and raw photos (large: ~160 dependencies)
+                Both are off by default; uninstall.sh removes what they
+                added.
 
 The other window manager installs on first use:
   omacosy-wm-switch omniwm | aerospace
@@ -25,11 +29,13 @@ EOF
 
 WM_FLAG=
 WITH_YAZI=0
+YAZI_FULL=0
 for arg in "$@"; do
   case "$arg" in
     --aerospace) WM_FLAG=aerospace ;;
     --omniwm) WM_FLAG=omniwm ;;
     --yazi) WITH_YAZI=1 ;;
+    --yazi-full) WITH_YAZI=1; YAZI_FULL=1 ;;
     -h | --help) usage; exit 0 ;;
     *) printf 'install.sh: unknown option: %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
   esac
@@ -122,11 +128,21 @@ comm -13 <(printf '%s\n' "$PRE_CASKS") <(brew list --cask 2>/dev/null | sort) \
 # uninstall.sh takes away exactly that. Once yazi is here, Super+Shift+Y is
 # bound on every later run, flag or not.
 if [ "$WITH_YAZI" = 1 ]; then
-  log "Installing yazi and its preview helpers (--yazi)"
-  for f in yazi fd poppler resvg sevenzip; do
+  YAZI_PKGS="yazi fd poppler resvg sevenzip"
+  [ "$YAZI_FULL" = 1 ] && YAZI_PKGS="$YAZI_PKGS ffmpeg-full imagemagick-full"
+  log "Installing yazi and its preview helpers ($YAZI_PKGS)"
+  for f in $YAZI_PKGS; do
     brew list --formula "$f" >/dev/null 2>&1 && continue
     if brew install "$f"; then mark "brew-formula $f"; else log "WARNING: could not install $f"; fi
   done
+  # The -full builds are keg-only: linked over any plain ffmpeg or
+  # imagemagick, or yazi keeps finding the plain one and its missing codecs.
+  if [ "$YAZI_FULL" = 1 ]; then
+    for f in ffmpeg-full imagemagick-full; do
+      brew list --formula "$f" >/dev/null 2>&1 \
+        && { brew link "$f" -f --overwrite >/dev/null 2>&1 || log "WARNING: could not link $f"; }
+    done
+  fi
 fi
 
 # --- 2. Symlinks ------------------------------------------------------------

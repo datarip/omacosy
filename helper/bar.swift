@@ -513,7 +513,11 @@ func apply(_ s: Snapshot) -> Bool {
     }
     if model.occupied != s.occupied { model.occupied = s.occupied; changed = true }
     if model.soleApp != s.soleApp { model.soleApp = s.soleApp; changed = true }
-    if !s.focused.isEmpty, model.focused != s.focused { model.focused = s.focused; changed = true }
+    if !s.focused.isEmpty, model.focused != s.focused {
+        tlog("focused \(s.focused) (snapshot)")
+        model.focused = s.focused
+        changed = true
+    }
     return changed
 }
 
@@ -2890,18 +2894,17 @@ func monitorIDs() -> [String: String] { // display name -> WM monitor id
 // A label no window manager gave: unique per display, and it matches no
 // WM id, so the display's workspace pills stay empty until one answers.
 func unresolvedID(_ screen: NSScreen) -> String { "unresolved:\(screenID(screen))" }
-var resolveRetryPending = false
 
-func rebuildSurfaces() {
-    let wm = omniwmActive() ? "omniwm" : "aerospace"
-    let ids = monitorIDs()
+// One bar per display, always; the window manager only labels them. A
+// display the manager does not list (not up yet, a login, a switch) is
+// unresolved: its workspace pills stay empty rather than show another
+// manager's state. reconcile() below asks again.
+func rebuildSurfaces(_ ids: [String: String]) {
+    let wm = labelsFromOmniWM ? "omniwm" : "aerospace"
     var kept: [BarSurface] = []
-    // One bar per display, always; the window manager only labels them. A
-    // manager that is not up yet (a login, a restart, a switch) must not
-    // take the bar away, so a display it does not list keeps its last label.
     for screen in NSScreen.screens {
         let existing = surfaces.first(where: { screenID($0.screen) == screenID(screen) })
-        let id = ids[screen.localizedName] ?? existing?.monitorID ?? unresolvedID(screen)
+        let id = ids[screen.localizedName] ?? unresolvedID(screen)
         let label = id.hasPrefix("unresolved:") ? "no window manager yet" : "\(wm) monitor \(id)"
         if let existing {
             if existing.monitorID != id {
@@ -2921,16 +2924,6 @@ func rebuildSurfaces() {
         gone.window.orderOut(nil)
     }
     surfaces = kept
-    // OmniWM starts without a launch notification (it is LSUIElement), so
-    // an unlabelled bar asks again until a window manager answers
-    if !resolveRetryPending, kept.contains(where: { $0.monitorID.hasPrefix("unresolved:") }) {
-        resolveRetryPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            resolveRetryPending = false
-            rebuildSurfaces()
-            kickRebuild()
-        }
-    }
 }
 
 func repaint() {
@@ -3247,68 +3240,113 @@ func stopOmniWatch() {
     p.terminate()
 }
 
-// The WM itself can change under the bar: omacosy-wm-switch quits one and
-// launches the other, and OmniWM.app appearing or vanishing is the
-// signal. Monitor ids have to be re-resolved — the two WMs name the same
-// display differently ("2" vs "display:…") — and the retries cover the
-// incoming WM still booting when the first attempt asks; a switch that
-// reverts fires this again from the other side.
-for event in [NSWorkspace.didLaunchApplicationNotification,
-              NSWorkspace.didTerminateApplicationNotification] {
-    NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { note in
-        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == omniwmBundleID else { return }
-        let launched = event == NSWorkspace.didLaunchApplicationNotification
-        tlog("wm: OmniWM \(launched ? "launched" : "quit")")
-        if launched { startOmniWatch() } else { stopOmniWatch() }
-        for delay in [1.0, 3.0, 8.0, 15.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                rebuildSurfaces()
-                kickRebuild()
+// ONE routine owns which window manager labels the bar. Both managers are
+// LSUIElement, so NSWorkspace posts no launch or quit for them; the list of
+// running apps is KVO-observable and does change, which is the event. It
+// starts or stops the OmniWM watch, drops the old manager's labels on a
+// switch (they name nothing now), asks the manager for display ids off the
+// main thread, and while any display is unresolved retries with backoff
+// (1, 2, 4, 8, 15, 30 s, then stops). An app switch, a screen change or
+// the managers changing start it again from the first step.
+let aerospaceBundleID = "bobko.aerospace"
+func runningWMs() -> [Bool] {
+    [omniwmActive(), !NSRunningApplication.runningApplications(withBundleIdentifier: aerospaceBundleID).isEmpty]
+}
+var labelsFromOmniWM = omniwmActive()
+var wmApps = runningWMs()
+let reconcileBackoff: [Double] = [1, 2, 4, 8, 15, 30]
+var reconcileStep = 0
+var reconcileRetry: DispatchWorkItem?
+func anyUnresolved() -> Bool { surfaces.contains { $0.monitorID.hasPrefix("unresolved:") } }
+// the focused workspace as the manager itself reports it (blocking: off-main)
+func managerFocused(_ omni: Bool) -> String {
+    omni
+        ? ((omniQuery("workspaces", ["--focused", "--fields", "raw-name"])?["workspaces"]
+            as? [[String: Any]])?.first?["rawName"] as? String ?? "")
+        : aerospace(["list-workspaces", "--focused"]).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+// After a switch the ring shows what the OLD manager had focused, and the
+// new one's stream can start before it answers at all. So the new manager
+// is asked directly, off the main thread, until two answers in a row agree
+// with the ring: at most six times over 12 s. An empty answer (still
+// starting, or a missed reply) does not count.
+func refocusSoon(_ omni: Bool, _ step: Int = 0, _ agreed: Int = 0) {
+    let delays = [1.0, 1.0, 1.0, 2.0, 3.0, 4.0]
+    guard step < delays.count, agreed < 2 else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + delays[step]) {
+        guard omniwmActive() == omni else { return }
+        rebuildQueue.async {
+            let f = managerFocused(omni)
+            DispatchQueue.main.async {
+                guard omniwmActive() == omni else { return }
+                if f.isEmpty { refocusSoon(omni, step + 1, 0); return }
+                if f == model.focused { refocusSoon(omni, step + 1, agreed + 1); return }
+                setFocused(f)
+                repaint()
+                tlog("wm: focused workspace \(f), from the manager")
+                refocusSoon(omni, step + 1, 0)
             }
         }
     }
 }
-
-// the manager the bar's display labels came from
-var labelsFromOmniWM = omniwmActive()
-
-// OmniWM.app is LSUIElement, so NSWorkspace never posts didLaunch or
-// didTerminate for it and the WM observer above cannot see a switch. The
-// workspace-bar watch was therefore only ever established at startup,
-// which is why a bar restart was the only cure for pills frozen on the
-// other manager's state. Both calls are no-ops when the state agrees.
-func reconcileWM() {
+func reconcile(_ why: String, restart: Bool = true) {
     let omni = omniwmActive()
     if omni { startOmniWatch() } else { stopOmniWatch() }
-    // The bar's labels come from the manager that runs now: the two name the
-    // same display differently ("1" vs "display:1"), and events for a label
-    // no bar carries are dropped, so the workspace ring froze after a switch.
-    // The retries cover a manager that does not answer yet.
-    guard omni != labelsFromOmniWM else { return }
-    labelsFromOmniWM = omni
-    tlog("wm: now \(omni ? "omniwm" : "aerospace"), relabelling the bar")
-    for delay in [0.0, 1.0, 3.0, 8.0] {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            rebuildSurfaces()
+    // after a switch, or once a display resolves, the ring still shows the
+    // workspace the OLD manager had focused: ask the new one
+    let refocus = omni != labelsFromOmniWM || anyUnresolved()
+    if omni != labelsFromOmniWM {
+        labelsFromOmniWM = omni
+        tlog("wm: now \(omni ? "omniwm" : "aerospace") (\(why)), relabelling the bar")
+        rebuildSurfaces([:])
+        repaint()
+        refocusSoon(omni)
+    }
+    if restart { reconcileStep = 0 }
+    reconcileRetry?.cancel()
+    reconcileRetry = nil
+    rebuildQueue.async {
+        let ids = monitorIDs()
+        let focused = refocus ? managerFocused(omni) : ""
+        DispatchQueue.main.async {
+            guard omniwmActive() == omni else { return } // a newer call owns it
+            rebuildSurfaces(ids)
+            if !focused.isEmpty, focused != model.focused {
+                setFocused(focused)
+                repaint()
+                tlog("wm: focused workspace \(focused), from the manager")
+            }
             kickRebuild()
+            guard anyUnresolved(), reconcileStep < reconcileBackoff.count else { return }
+            let delay = reconcileBackoff[reconcileStep]
+            reconcileStep += 1
+            tlog("wm: display unresolved, asking again in \(Int(delay)) s")
+            let retry = DispatchWorkItem { reconcile("retry", restart: false) }
+            reconcileRetry = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
         }
     }
 }
-// on every app activation, and every 2 s for a switch that activates no
-// app (a move between empty workspaces); the check is an in-process lookup
-Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in reconcileWM() }
+let wmAppsWatch = NSWorkspace.shared.observe(\.runningApplications, options: []) { _, _ in
+    DispatchQueue.main.async {
+        let now = runningWMs()
+        guard now != wmApps else { return }
+        wmApps = now
+        tlog("wm: omniwm \(now[0] ? "up" : "down"), aerospace \(now[1] ? "up" : "down")")
+        reconcile("wm-apps")
+    }
+}
 
 // front app: a notification, not a poll and not a script
 NSWorkspace.shared.notificationCenter.addObserver(
     forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
 ) { note in
-    reconcileWM()
-
     let t0 = DispatchTime.now().uptimeNanoseconds
     guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
           let name = app.localizedName, name != model.frontApp,
           app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+    // someone is using the Mac: an unresolved display is worth asking about now
+    if anyUnresolved() { reconcile("activation") }
     model.frontApp = name
     repaint()
     let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
@@ -3374,20 +3412,13 @@ NotificationCenter.default.addObserver(
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
         resyncIfGained()
         closePopup() // its anchor may not exist any more
-        rebuildSurfaces()
+        var known: [String: String] = [:] // two identical monitors share a name
+        for surface in surfaces { known[surface.screen.localizedName] = surface.monitorID }
+        rebuildSurfaces(known)
         applyShade() // a new display arrives at full output
-        kickRebuild()
-        // the 1 s grace can still lose the race with the WM adopting
-        // the new display — its monitor id resolves to nothing and the
-        // screen stays barless (the Dell did, on replug). Same retry
-        // ladder the WM-switch path uses.
-        for delay in [3.0, 8.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                rebuildSurfaces()
-                applyShade()
-                kickRebuild()
-            }
-        }
+        // the WM can adopt the new display after this grace: reconcile asks
+        // again until it answers, with its own backoff
+        reconcile("screens")
         let now = NSScreen.screens.count
         guard now != monitorCount else { return }
         let wasSingle = monitorCount == 1
@@ -3670,12 +3701,8 @@ Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { _ in updateWeather
 model.frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
 // startup only: from here the fast paths keep it — the hook file under
 // aerospace, the watch stream under omniwm
-model.focused = omniwmActive()
-    ? ((omniQuery("workspaces", ["--focused", "--fields", "raw-name"])?["workspaces"]
-        as? [[String: Any]])?.first?["rawName"] as? String ?? "")
-    : aerospace(["list-workspaces", "--focused"])
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-rebuildSurfaces()
+model.focused = managerFocused(omniwmActive())
+rebuildSurfaces(monitorIDs())
 guard !surfaces.isEmpty else {
     FileHandle.standardError.write("omacosy-bar: no display\n".data(using: .utf8)!)
     exit(1)
@@ -3689,7 +3716,7 @@ updateWifi()
 updateWeather()
 repaint()
 primeMedia()
-startOmniWatch() // a no-op under aerospace; the WM observer handles switches
+reconcile("startup") // the OmniWM watch, and retries for a manager not up yet
 resyncWallpaper() // a display plugged in while the machine was off missed the last theme change
 tlog("omacosy-bar up on " + surfaces.map { "\($0.screen.localizedName)=m\($0.monitorID)\($0.notched ? " (notched)" : "")" }.joined(separator: ", "))
 app.run()

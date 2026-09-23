@@ -58,7 +58,8 @@ let EVENT_WINDOW_ORDER: UInt32 = 808
 let EVENT_WINDOW_VISIBILITY: UInt32 = 815
 let EVENT_WINDOW_CREATE: UInt32 = 1325
 let EVENT_WINDOW_DESTROY: UInt32 = 1326
-// a minimize begins: no window id in the payload, verified by probe
+// a minimize begins; the payload names the animation, not the window
+// (docs/probes/ring-events.swift, below too)
 let EVENT_WINDOW_MINIMIZE: UInt32 = 1327
 // Both name the window in their payload. 816 fires as a window leaves the
 // screen (hide, quit, the end of a close fade or of a minimize); 804 as it

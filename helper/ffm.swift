@@ -251,7 +251,27 @@ guard AXIsProcessTrustedWithOptions(
 // "glide into a window and rest" must still confirm ~100ms later.
 let overlayFlag = "/tmp/omacosy-overlay-active-\(getuid())"
 
+// OmniWM has its own focus-follows-mouse, and the two fight. launchd
+// starts this agent at every login whichever manager runs, so it stands
+// down by itself while OmniWM runs, however it was started.
+let omniwmBundleID = "com.barut.OmniWM"
+// Cached for 0.5 s, as in borders.swift: process() runs up to ~25 times a
+// second while the mouse moves, and the lookup walks every running app.
+var omniwmCached = false
+var omniwmCheckedAt = Date.distantPast
+func omniwmRunning() -> Bool {
+    if Date().timeIntervalSince(omniwmCheckedAt) < 0.5 { return omniwmCached }
+    omniwmCheckedAt = Date()
+    omniwmCached = !NSRunningApplication.runningApplications(withBundleIdentifier: omniwmBundleID).isEmpty
+    return omniwmCached
+}
+
 func process(confirmed: Bool) {
+    if omniwmRunning() {
+        pendingKey = ""
+        dwellWork?.cancel()
+        return
+    }
     // the workspace overview is up: it holds key focus deliberately,
     // and it floats above layer 0 so the hit-test would tunnel through
     // it and focus the tile underneath — stealing key out from under

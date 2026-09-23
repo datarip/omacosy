@@ -223,6 +223,10 @@ if [ -f "$MANIFEST" ] && grep -qE '^brew-(formula|cask) ' "$MANIFEST"; then
   grep '^brew-cask ' "$MANIFEST" | awk '{print $2}' \
     | xargs -n1 brew uninstall --cask 2>/dev/null || true
 fi
+# the login item would point at an app that is gone
+if [ ! -d /Applications/OmniWM.app ]; then
+  osascript -e 'tell application "System Events" to if exists login item "OmniWM" then delete login item "OmniWM"' >/dev/null 2>&1 || true
+fi
 if have "installed-homebrew"; then
   echo "Note: Homebrew itself was installed by omacosy; remove it with the"
   echo "official uninstall script if you don't want it."

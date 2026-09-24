@@ -291,6 +291,11 @@ func isFullscreen(_ r: CGRect) -> Bool {
     for i in 0..<Int(n) {
         let d = CGDisplayBounds(ids[i])
         guard d.intersects(r) else { continue }
+        // Across this display, not beside it. OmniWM parks hidden workspaces'
+        // windows at full size one point onto a display edge (1439,0 or,
+        // with a second display to the right, -1439,0), and `intersects`
+        // alone let such a window pass the tests below.
+        guard r.minX >= d.minX - 2, r.maxX <= d.maxX + 2 else { continue }
         // native fullscreen (incl. split-view halves): starts at the
         // display top or just below the notch strip, and spans the
         // remaining height. Managed windows never do — the bar owns

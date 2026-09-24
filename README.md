@@ -544,8 +544,11 @@ copy of anything.
 ## Back to a normal Mac
 
 ```sh
-cd ~/.local/share/omacosy && ./uninstall.sh
+~/.local/share/omacosy/uninstall.sh
 ```
+
+If you cloned omacosy somewhere else, run `<your clone>/uninstall.sh`.
+The script finds the clone from its own path.
 
 Manifest-driven: `install.sh` records what this machine actually gained
 (Homebrew packages that weren't already present, cloned repos, every
@@ -562,8 +565,10 @@ After the script, do these steps in this order:
 
 1. Close the terminal window and open a new one. The old window still
    uses omacosy's shell setup, and some of the programs it calls are gone.
-2. Delete the repo. The script keeps it:
-   `rm -rf ~/.local/share/omacosy`.
+2. Optional: delete the clone. The script keeps it, and nothing breaks
+   if it stays. With the clone kept, a reinstall is one command. To
+   delete it, run `rm -rf <your clone>`. The default clone is
+   `~/.local/share/omacosy`.
 3. If omacosy installed Homebrew, the script says so. To remove Homebrew
    too, use Homebrew's own uninstall script. Homebrew packages you had
    before omacosy stay installed.

@@ -402,7 +402,7 @@ fi
 # focused-window border ring (replaces JankyBorders; no permissions;
 # SkyLight for the window-server event notifications)
 if [ ! -x "$HOME/.local/bin/omacosy-borders" ] || [ "$REPO_DIR/helper/borders.swift" -nt "$HOME/.local/bin/omacosy-borders" ]; then
-  log "Building omacosy-borders"
+  log "Building omacosy-borders (grant Accessibility when prompted)"
   swiftc -O -F /System/Library/PrivateFrameworks -framework SkyLight -o "$HOME/.local/bin/omacosy-borders" "$REPO_DIR/helper/borders.swift"
 fi
 # stable code identity so TCC grants survive rebuilds (skipped when no

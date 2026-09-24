@@ -2,7 +2,8 @@
 // One click-through overlay window whose CAShapeLayer stroke is
 // rasterized by the WindowServer (no window-sized client bitmaps — the
 // architecture that made JankyBorders cost hundreds of MB). Needs no
-// permissions at all.
+// permission. With Accessibility it also hears a closing window at once
+// (see watchClose); without it, it falls back to watchAfterClick.
 //
 // Event-driven via private SkyLight window-server notifications (the
 // same layer JankyBorders and yabai use, verified on macOS 26.3):
@@ -552,6 +553,7 @@ func tick() {
     }
     justHid = false
     shownWid = lastWid
+    watchClose(shownWid)
 
     guard f != lastFrame || !win.isVisible else { return }
     // same app moving on the same display glides tick-by-tick; any
@@ -739,36 +741,98 @@ if SLSGetEventPort(cid, &eventPort).rawValue == 0,
     tlog("SLSGetEventPort failed — running on heartbeat only")
 }
 
-// A closing window fades out over ~240 ms and the window server sends
-// this connection nothing while it does, so the ring sat at full colour
-// on a window that was visibly going. Re-read the ringed window alone
-// (one window id, ~0.1 ms) often enough that no fade outlives it.
-// Armed only while someone has used the keyboard or mouse in the last five
-// minutes: a close is a key press or a click, and away from the Mac the
-// daemon wakes only for its heartbeat. HID input age needs no permission;
-// the heartbeat arms and disarms.
-let activeFor: Double = 300
-var ringWatch: Timer?
-func armRingWatch() {
-    let idle = CGEventSource.secondsSinceLastEventType(.hidSystemState,
-        eventType: CGEventType(rawValue: ~0)!)
-    guard win.isVisible, idle < activeFor else { ringWatch?.invalidate(); ringWatch = nil; return }
-    guard ringWatch == nil else { return }
-    let t = Timer(timeInterval: 0.05, repeats: true) { _ in
-        guard win.isVisible, ringedWindowGone() else { return }
-        hideRing("window-gone")
-        syncShroud(nil)
-    }
-    RunLoop.current.add(t, forMode: .common)
-    ringWatch = t
+// A close sends WindowServer nothing during its ~250 ms fade: 816, 804 and
+// 1326 come at its end (docs/probes/ring-events.swift, `all` mode). The app
+// itself reports kAXUIElementDestroyed at the START of the fade, 235-275 ms
+// earlier (measured 2026-09-24 on TextEdit: Cmd-W, the red button and
+// AppleScript, 3 runs each). So, with Accessibility, the ringed window alone
+// is watched for that report; nothing runs between events.
+//
+// READ-ONLY by design, and keep it so: the grant covers every later build of
+// this file without asking the user again. The ring reads an app's window
+// list and registers ONE notification on ONE window. It never performs an
+// action, never sets an attribute, and never reads what a window shows.
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ el: AXUIElement, _ wid: UnsafeMutablePointer<UInt32>) -> AXError
+
+let axQueue = DispatchQueue(label: "omacosy-borders.ax")   // AX calls block: never on main
+var axObserver: AXObserver?
+var axObserverPid: pid_t = 0
+var axWatchWid: UInt32 = 0
+var axWatchedEl: AXUIElement?   // touched on axQueue only
+
+let axDestroyed: AXObserverCallback = { _, _, _, refcon in
+    let wid = UInt32(UInt(bitPattern: refcon))
+    guard wid != 0, wid == shownWid, win.isVisible else { return }
+    hideRing("ax-destroyed")
+    syncShroud(nil)
 }
+
+func watchClose(_ wid: UInt32) {
+    guard wid != axWatchWid else { return }
+    axWatchWid = wid
+    guard wid != 0, AXIsProcessTrusted(),
+        let pid = (CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]])?
+            .first?["kCGWindowOwnerPID"] as? pid_t else { return }
+    if pid != axObserverPid || axObserver == nil {
+        if let old = axObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(old), .defaultMode)
+        }
+        var o: AXObserver?
+        guard AXObserverCreate(pid, axDestroyed, &o) == .success, let o else { axObserver = nil; return }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(o), .defaultMode)
+        axObserver = o
+        axObserverPid = pid
+        axQueue.async { axWatchedEl = nil }   // it belonged to the old observer
+    }
+    let obs = axObserver!
+    axQueue.async {
+        if let el = axWatchedEl {
+            AXObserverRemoveNotification(obs, el, kAXUIElementDestroyedNotification as CFString)
+            axWatchedEl = nil
+        }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)   // a hung app cannot hold this queue
+        var list: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &list) == .success,
+            let windows = list as? [AXUIElement] else { return }
+        for el in windows {
+            var w: UInt32 = 0
+            guard _AXUIElementGetWindow(el, &w) == .success, w == wid else { continue }
+            AXObserverAddNotification(obs, el, kAXUIElementDestroyedNotification as CFString,
+                UnsafeMutableRawPointer(bitPattern: UInt(wid)))
+            axWatchedEl = el
+            return
+        }
+    }
+}
+
+// Without Accessibility: a click can start a close (the red button), so a
+// click starts a short check of the ringed window, every 20 ms for at most
+// 0.7 s. A Cmd-W close then leaves on 816, at the end of the fade.
+func watchAfterClick() {
+    let wid = shownWid
+    guard wid != 0 else { return }
+    let started = Date()
+    func check() {
+        guard win.isVisible, shownWid == wid else { return }
+        if ringedWindowGone() { hideRing("window-gone"); syncShroud(nil); return }
+        guard Date().timeIntervalSince(started) < 0.7 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: check)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: check)
+}
+let clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { _ in
+    if !AXIsProcessTrusted() { watchAfterClick() }
+}
+// ask once at startup; macOS shows its own prompt when the grant is missing
+_ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
 
 // safety net for anything eventless (subscription races, missed
 // events): cheap at this cadence, and the only whole-list poll
 let timer = Timer(timeInterval: 0.5, repeats: true) { _ in
     rebuildSubscriptions()
     tick()
-    armRingWatch()
 }
 RunLoop.current.add(timer, forMode: .common)
 

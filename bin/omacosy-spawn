@@ -143,14 +143,17 @@ if wm_is_omniwm; then
   # never shows a window cannot wedge the terminal key.
   "$OMNI" wait-window "$before" 2000 >/dev/null 2>&1 &
   waiter=$!
+  # The window existing is not enough: the next spawn's preselect measures
+  # the FOCUSED window, and until this one has taken focus and its tile has
+  # stopped moving it would measure the previous one and split the wrong way.
+  # A Finder window (AppleScript, then activate) is the slow case; measured,
+  # a burst of three came out as three narrow columns in 4 runs of 5.
+  # Subscribed before the open too, for the same reason as the waiter above.
+  "$OMNI" wait-settled "${prev:-none}" 1500 >/dev/null 2>&1 &
+  settler=$!
   "${SPAWN[@]}"
   wait "$waiter" 2>/dev/null || true
-  # The window exists, but the next spawn's preselect measures the FOCUSED
-  # window: until this one has taken focus and its tile has stopped moving,
-  # it would measure the previous one and split the wrong way. A Finder
-  # window (AppleScript, then activate) is the slow case; measured, a burst
-  # of three came out as three narrow columns in 4 runs of 5.
-  "$OMNI" wait-settled "${prev:-none}" 1500 >/dev/null 2>&1 || true
+  wait "$settler" 2>/dev/null || true
   exit 0
 fi
 

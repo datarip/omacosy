@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 // The focused window's id and frame; id is "" when none is focused.
@@ -200,43 +201,54 @@ int main(int argc, char** argv)
 		focused_window(c, id, sizeof id, f);
 		if (id[0]) printf("%s\n", id); else rc = 1;
 	} else if (!strcmp(op, "wait-settled") && argc > 2) {
-		// The spawn lock's release condition. Focus has moved off <old-id>
-		// to the new window, and OmniWM has put that window in its tile:
-		// its frame changed at least once since it first appeared (a new
-		// window first sits still where the app placed it, so "the same
-		// twice" alone can mean "not tiled yet"), then reads the same twice,
-		// 30 ms apart. A window that never moves counts after 400 ms still.
+		// The spawn lock's release condition: focus has moved off <old-id> to
+		// the new window, and OmniWM has put that window in its tile.
+		// Focus comes from OmniWM's focus channel, so nothing is asked until
+		// it arrives. The tile does not: all of OmniWM's events arrive once,
+		// as the window appears and before its tile animation (~200 ms), and
+		// none when it ends (measured 2026-09-24, 3 runs). So after the focus
+		// event, a short check of the frame, 30 ms apart, within the timeout:
+		// it must change at least once (a new window first sits where the app
+		// put it), then read the same twice. One that never moves counts after
+		// 400 ms still.
 		int timeout = argc > 3 ? atoi(argv[3]) : 1500;
-		char id[256], newid[256] = "";
-		double f[4], first[4], lf[4];
-		int moved = 0, still = 0;
 		rc = 1;
-		// Nothing to settle, so no wait: pressed from a window in macOS's own
-		// fullscreen (each new window opens in a Space of its own, with no
-		// tile); or no window has OmniWM's focus 500 ms in, which is where
-		// the next press from such a Space starts. On an empty workspace the
-		// first window takes focus well inside that (140-320 ms measured).
-		if (native_fullscreen(c, argv[2])) { rc = 0; timeout = -1; }
-		int unfocused = 0;
-		for (int waited = 0; waited <= timeout; waited += 30) {
-			focused_window(c, id, sizeof id, f);
-			unfocused = id[0] ? 0 : unfocused + 30;
-			if (unfocused >= 500) { rc = 0; break; }
-			if (id[0] && strcmp(id, argv[2]) && f[2] > 0) {
-				if (strcmp(id, newid)) { // a new window took focus: start over on it
-					snprintf(newid, sizeof newid, "%s", id);
-					memcpy(first, f, sizeof f);
-					memcpy(lf, f, sizeof f);
-					moved = 0;
-					still = 0;
-				} else {
-					if (memcmp(f, first, sizeof f)) moved = 1;
-					still = memcmp(f, lf, sizeof f) ? 0 : still + 30;
-					memcpy(lf, f, sizeof f);
-					if ((moved && still >= 30) || still >= 400) { rc = 0; break; }
+		// Nothing to settle: pressed from a window in macOS's own fullscreen
+		// (each new window opens in a Space of its own, with no tile).
+		if (native_fullscreen(c, argv[2])) {
+			rc = 0;
+		} else {
+			struct timeval t0, t1;
+			gettimeofday(&t0, NULL);
+			// or nothing has focus 500 ms in, where the next press from such
+			// a Space starts; on an empty workspace the first window takes
+			// focus well inside that (140-320 ms measured)
+			char* nid = omniwm_wait_focus_change(argv[2], timeout, 500);
+			if (nid && !nid[0]) rc = 0;
+			if (nid && nid[0]) {
+				gettimeofday(&t1, NULL);
+				int left = timeout - (int)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000);
+				char id[256];
+				double f[4], first[4] = { -1, -1, -1, -1 }, lf[4];
+				int moved = 0, still = 0, seen = 0;
+				for (int waited = 0; waited <= left; waited += 30) {
+					focused_window(c, id, sizeof id, f);
+					if (!strcmp(id, nid) && f[2] > 0) {
+						if (!seen) {
+							memcpy(first, f, sizeof f);
+							memcpy(lf, f, sizeof f);
+							seen = 1;
+						} else {
+							if (memcmp(f, first, sizeof f)) moved = 1;
+							still = memcmp(f, lf, sizeof f) ? 0 : still + 30;
+							memcpy(lf, f, sizeof f);
+							if ((moved && still >= 30) || still >= 400) { rc = 0; break; }
+						}
+					}
+					usleep(30000);
 				}
 			}
-			usleep(30000);
+			free(nid);
 		}
 	} else if (!strcmp(op, "preselect-for-focused")) {
 		// OmniWM's own orientation rule on the focused tile:

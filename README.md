@@ -206,7 +206,9 @@ Why so much of it is self-built:
 - **JankyBorders** keeps a bitmap per window and costs hundreds of MB.
   `omacosy-borders` strokes one CAShapeLayer that the WindowServer
   rasterizes, driven by SkyLight notifications for focus, move and
-  resize, so the ring glides with drags without polling.
+  resize, so the ring glides with drags without polling. With
+  Accessibility it also hears an app report that the ringed window is
+  closing, so the ring is gone before the window starts to fade.
 - **Mission Control** cannot see AeroSpace's virtual workspaces, so a
   workspace overview cannot be had any other way than
   `omacosy-overview` capturing them itself.

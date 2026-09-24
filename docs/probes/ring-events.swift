@@ -12,7 +12,9 @@
 // Needs one TextEdit document on screen, and moves nothing else. Measured on
 // macOS 27.2 (helper/borders.swift relies on these):
 //   hide, quit:  816 (and 804, 1326 for quit) as the window leaves
-//   close:       nothing at all during the ~250 ms fade; 816, 804, 1326 at its end
+//   close:       nothing at all during the ~250 ms fade, in `all` mode too
+//                (2026-09-24, 3 runs); 816, 804, 1326 at its end. The app's own
+//                Accessibility report comes earlier: see ax-close.swift
 //   min:         1327 as the minimize starts, 1328 as it ends, both naming an
 //                animation id rather than the window; 816 names it at the end
 import AppKit

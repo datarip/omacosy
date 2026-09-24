@@ -100,9 +100,9 @@ func aerospace(_ args: [String]) -> String {
 }
 
 // The OTHER window manager. omacosy-wm-switch can hand the session from
-// AeroSpace to OmniWM (and back) while this daemon runs, so which one is
-// asked is decided per use, never cached: the running-app check is an
-// in-process lookup, cheap enough to be the whole detection.
+// AeroSpace to OmniWM (and back) while this daemon runs. The running-app
+// check is an in-process lookup, cheap enough to be the whole detection;
+// reconcile() below keeps which manager labels the bar in labelsFromOmniWM.
 let omniwmBundleID = "com.barut.OmniWM"
 
 func omniwmActive() -> Bool {
@@ -2910,6 +2910,13 @@ func rebuildSurfaces(_ ids: [String: String]) {
             if existing.monitorID != id {
                 tlog("monitor: \(screen.localizedName) is now \(label) (was \(existing.monitorID))")
                 existing.monitorID = id
+                // the old manager's workspaces name nothing now, and apply()
+                // keeps a list it is not given: clear them for the placeholder
+                if id.hasPrefix("unresolved:") {
+                    existing.workspaces = []
+                    existing.mine = []
+                    existing.visible = ""
+                }
             }
             existing.screen = screen
             existing.place()
@@ -3190,16 +3197,29 @@ func omniWorkspaceBarEvent(_ line: Data) {
                 Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))
 }
 
+var omniWatchStarting = false
 func startOmniWatch() {
-    guard omniWatch == nil, omniwmActive() else { return }
+    guard omniWatch == nil, !omniWatchStarting, omniwmActive() else { return }
+    omniWatchStarting = true
     // a bar killed by launchd (kickstart -k is SIGKILL) leaves its
     // stream child alive under pid 1, one per restart — reap orphans
-    // before spawning ours; -P 1 cannot touch a living bar's child
-    let reap = Process()
-    reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-    reap.arguments = ["-P", "1", "-f", "omniwmctl watch workspace-bar"]
-    try? reap.run()
-    reap.waitUntilExit()
+    // before spawning ours; -P 1 cannot touch a living bar's child.
+    // pkill is waited for, so off the main thread.
+    DispatchQueue.global(qos: .utility).async {
+        let reap = Process()
+        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        reap.arguments = ["-P", "1", "-f", "omniwmctl watch workspace-bar"]
+        try? reap.run()
+        reap.waitUntilExit()
+        DispatchQueue.main.async {
+            omniWatchStarting = false
+            guard omniWatch == nil, omniwmActive() else { return }
+            spawnOmniWatch()
+        }
+    }
+}
+
+func spawnOmniWatch() {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: omniwmctlBin)
     p.arguments = ["watch", "workspace-bar", "--exec", "/bin/cat"]
@@ -3244,8 +3264,9 @@ func stopOmniWatch() {
 // LSUIElement, so NSWorkspace posts no launch or quit for them; the list of
 // running apps is KVO-observable and does change, which is the event. It
 // starts or stops the OmniWM watch, drops the old manager's labels on a
-// switch (they name nothing now), asks the manager for display ids off the
-// main thread, and while any display is unresolved retries with backoff
+// switch (they name nothing now), asks the manager for display ids and its
+// focused workspace off the main thread, and while a display is unresolved
+// or the focused workspace is not yet confirmed retries with backoff
 // (1, 2, 4, 8, 15, 30 s, then stops). An app switch, a screen change or
 // the managers changing start it again from the first step.
 let aerospaceBundleID = "bobko.aerospace"
@@ -3266,41 +3287,23 @@ func managerFocused(_ omni: Bool) -> String {
         : aerospace(["list-workspaces", "--focused"]).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 // After a switch the ring shows what the OLD manager had focused, and the
-// new one's stream can start before it answers at all. So the new manager
-// is asked directly, off the main thread, until two answers in a row agree
-// with the ring: at most six times over 12 s. An empty answer (still
-// starting, or a missed reply) does not count.
-func refocusSoon(_ omni: Bool, _ step: Int = 0, _ agreed: Int = 0) {
-    let delays = [1.0, 1.0, 1.0, 2.0, 3.0, 4.0]
-    guard step < delays.count, agreed < 2 else { return }
-    DispatchQueue.main.asyncAfter(deadline: .now() + delays[step]) {
-        guard omniwmActive() == omni else { return }
-        rebuildQueue.async {
-            let f = managerFocused(omni)
-            DispatchQueue.main.async {
-                guard omniwmActive() == omni else { return }
-                if f.isEmpty { refocusSoon(omni, step + 1, 0); return }
-                if f == model.focused { refocusSoon(omni, step + 1, agreed + 1); return }
-                setFocused(f)
-                repaint()
-                tlog("wm: focused workspace \(f), from the manager")
-                refocusSoon(omni, step + 1, 0)
-            }
-        }
-    }
-}
+// new one's stream can start before it answers at all. So reconcile asks the
+// new manager directly, off the main thread, and keeps asking on its own
+// backoff until two answers in a row agree with the ring. An empty answer
+// (still starting, or a missed reply) does not count.
+var refocusAgreed = 2   // 2 = nothing to confirm
 func reconcile(_ why: String, restart: Bool = true) {
     let omni = omniwmActive()
     if omni { startOmniWatch() } else { stopOmniWatch() }
     // after a switch, or once a display resolves, the ring still shows the
     // workspace the OLD manager had focused: ask the new one
-    let refocus = omni != labelsFromOmniWM || anyUnresolved()
+    if omni != labelsFromOmniWM || anyUnresolved() { refocusAgreed = 0 }
+    let refocus = refocusAgreed < 2
     if omni != labelsFromOmniWM {
         labelsFromOmniWM = omni
         tlog("wm: now \(omni ? "omniwm" : "aerospace") (\(why)), relabelling the bar")
         rebuildSurfaces([:])
         repaint()
-        refocusSoon(omni)
     }
     if restart { reconcileStep = 0 }
     reconcileRetry?.cancel()
@@ -3311,17 +3314,25 @@ func reconcile(_ why: String, restart: Bool = true) {
         DispatchQueue.main.async {
             guard omniwmActive() == omni else { return } // a newer call owns it
             rebuildSurfaces(ids)
-            if !focused.isEmpty, focused != model.focused {
-                setFocused(focused)
-                repaint()
-                tlog("wm: focused workspace \(focused), from the manager")
+            if refocus, !focused.isEmpty {
+                if focused == model.focused {
+                    refocusAgreed += 1
+                } else {
+                    setFocused(focused)
+                    repaint()
+                    tlog("wm: focused workspace \(focused), from the manager")
+                    refocusAgreed = 0
+                }
             }
             kickRebuild()
-            guard anyUnresolved(), reconcileStep < reconcileBackoff.count else { return }
+            let unresolved = anyUnresolved()
+            guard unresolved || refocusAgreed < 2, reconcileStep < reconcileBackoff.count else { return }
             let delay = reconcileBackoff[reconcileStep]
             reconcileStep += 1
-            tlog("wm: display unresolved, asking again in \(Int(delay)) s")
+            tlog("wm: \(unresolved ? "display unresolved" : "focus not confirmed"), asking again in \(Int(delay)) s")
             let retry = DispatchWorkItem { reconcile("retry", restart: false) }
+            // two calls in flight both land here: keep only the newest retry
+            reconcileRetry?.cancel()
             reconcileRetry = retry
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
         }

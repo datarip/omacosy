@@ -67,14 +67,12 @@ func SLSRegisterNotifyProc(_ proc: NotifyProc, _ event: UInt32, _ context: Unsaf
 func SLSGetEventPort(_ cid: Int32, _ port: UnsafeMutablePointer<mach_port_t>) -> CGError
 @_silgen_name("SLEventCreateNextEvent")
 func SLEventCreateNextEvent(_ cid: Int32) -> Unmanaged<CGEvent>?
-// Whether the NATIVE menu bar is on screen, asked of the window server
-// instead of guessed from the pointer. Visibility is a property of a SPACE
-// and every display has its own current space, so the pair answers the
-// question per display. See nativeMenuBarRevealed.
+// Whether a display shows a macOS native fullscreen space. Every display has
+// its own current space, so the pair answers per display. See inNativeFullscreen.
 @_silgen_name("SLSManagedDisplayGetCurrentSpace")
 func SLSManagedDisplayGetCurrentSpace(_ cid: Int32, _ display: CFString) -> UInt64
-@_silgen_name("SLSIsMenuBarVisibleOnSpace")
-func SLSIsMenuBarVisibleOnSpace(_ cid: Int32, _ space: UInt64) -> Bool
+@_silgen_name("SLSSpaceGetType")
+func SLSSpaceGetType(_ cid: Int32, _ space: UInt64) -> Int32
 
 let EVENT_WINDOW_MOVE: UInt32 = 806
 let EVENT_WINDOW_RESIZE: UInt32 = 807
@@ -689,7 +687,10 @@ func captureOwnStrip(_ surface: BarSurface) {
     // bar, which macOS reveals for any top-edge hover including the left.
     // Verified by eye on both captures: including this window gives this
     // bar's pills, excluding it gives the Apple logo and the app's menus.
-    guard !stripCaptureInFlight, surface.atTopEdge else { return }
+    // Only an auto-hiding bar paints the strip, and a native fullscreen space
+    // shows macOS's black menu bar, not the wallpaper's.
+    guard surface.autohide, !stripCaptureInFlight, surface.atTopEdge,
+          !inNativeFullscreen(surface.screen) else { return }
     // Once per wallpaper per SESSION, not once per hover and not once ever.
     //
     // The colour is a function of the wallpaper and of nothing else on screen,
@@ -3300,7 +3301,7 @@ let stackOffset: CGFloat = ProcessInfo.processInfo.environment["OMACOSY_BAR_STAC
 // one: the right value depends on how far left a user's status items
 // reach, which is why it is a key at all.
 struct BarConf {
-    var autohide: Bool?          // nil = derive from the display
+    var autohide: Bool? = false  // nil = "auto", derived from the display
     var split: CGFloat = 0.5
     var slideTime: Double = 0.2  // seconds; 0 is the instant switch
 }
@@ -3320,8 +3321,8 @@ func loadBarConf() -> BarConf {
         if key == "autohide" {
             switch val {
             case "on", "true", "1": c.autohide = true
-            case "off", "false", "0": c.autohide = false
-            default: c.autohide = nil            // "auto", and anything unreadable
+            case "auto": c.autohide = nil
+            default: c.autohide = false          // "off", and anything unreadable
             }
         } else if key == "split", let v = Double(val), v > 0, v < 1 {
             c.split = CGFloat(v)
@@ -3388,9 +3389,6 @@ final class BarSurface {
     var revealed = false
     var atTopEdge = false
     var latchedBar = false
-    var yielded = false          // notched: stood aside for the native bar
-    var yieldSeq = 0             // cancels a pending return, see setYielded
-    var followSeq = 0            // drops an overtaken ask, see followNativeBar
     // Where the window is on its vertical travel. Only a sliding surface
     // ever leaves .down.
     var slide: BarSlide = .down
@@ -3399,12 +3397,11 @@ final class BarSurface {
     // to tell that it is no longer the move in flight.
     var slideSeq = 0
 
-    // A notched display has nothing to reclaim. macOS already excludes the
-    // camera strip from the usable area, so hiding the bar there gives back
-    // no screen and only costs the strip its contents. A flat panel and an
-    // external monitor lose a bar's height to it, so they hide by default
-    // and hand the space to windows. Derived from the hardware, overridable
-    // per machine in bar.conf.
+    // Off unless bar.conf asks for it: a missing file or an unreadable value
+    // keeps the bar visible. autohide=auto derives it from the hardware. A
+    // notched display has nothing to reclaim, because macOS already excludes
+    // the camera strip from the usable area; a flat panel and an external
+    // monitor lose a bar's height to it, so auto hides the bar there.
     var autohide: Bool { barConf.autohide ?? !notched }
 
     // A bar that is always on screen has nowhere to slide from, so the
@@ -3447,9 +3444,10 @@ final class BarSurface {
         // This does NOT make the fullscreen check redundant, which was the
         // hope. On a notched display a fullscreen window starts BELOW the
         // notch — measured at y=32 — so it cannot cover a bar drawn from
-        // y=0 by z-order alone. Being below windows is still worth it: the
-        // bar can never float over an app, and on a flat display fullscreen
-        // covers it for free.
+        // y=0 by z-order alone. This is only the starting level: a bar that
+        // stays visible is raised to barRestLevel (20) below, which clears
+        // app overlays and sits under the native menu bar. An auto-hiding
+        // bar is off screen at rest, so fullscreen covers it for free.
         window.level = NSWindow.Level(rawValue: -20)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.acceptsMouseMovedEvents = true // tracking areas need the moves
@@ -3500,43 +3498,25 @@ final class BarSurface {
         view.surface = self
         // A bar that never hides draws NO background of its own: no material
         // and no painted strip, so what is behind the top edge shows through
-        // and only the pills are added to it. That is the notched default —
-        // `autohide` is `!notched`, so a notched Mac takes this path without
-        // configuring anything — and it is what `omacosy-bar-autohide off`
-        // gives anyone who asks for the bar to stay.
+        // and only the pills are added to it. That is the default:
+        // autohide=off, or a notched display under auto.
         //
         // An auto-hiding bar keeps both: it arrives into an EMPTY strip
         // rather than over something, so it has to bring its own background
         // or there is nothing there at all.
         backdrop.isHidden = !autohide
 
-        // Visible from the start, for an auto-hiding surface.
-        //
-        // This read `backdrop.isHidden = !autohide`, on the reasoning that an
-        // auto-hiding surface hides by ordering its window out and so never
-        // needs the backdrop toggled, while one that stays on screen has
-        // something left to toggle. The second half does not hold: `slides`
-        // is `autohide && slideTime > 0`, so a surface that does NOT hide
-        // never slides, and slideBar — the only other place that unhides
-        // this — is never reached. The backdrop stayed hidden for the life
-        // of the process.
-        //
-        // BarView is a SUBVIEW of the backdrop, so hiding it hides every
-        // pill, the clock and the strip colour. The window was on screen,
-        // at the right size, drawing nothing. Measured with autohide=off:
-        // the top strip was wallpaper, unchanged whether the bar ran or not.
-        //
-        // It reaches further than the opt-in. `autohide` defaults to
-        // `!notched`, so a notched display takes this path by default, and
-        // the bar would be invisible there on a stock install.
         // Remembered first, wallpaper only on a machine that has never
         // sampled. Either way it is never empty, and an empty strip is what
         // puts the effect view back on screen and the reveal ramp with it.
         // The capture remembered for the wallpaper showing now. Keyed, so a
         // restart after a theme change no longer paints the previous
         // wallpaper's colour, which the old single-slot cache did.
-        backdropStrip = loadStrips(self)[wallpaperKey()].map { [$0] } ?? []
-        if backdropStrip.isEmpty { backdropStrip = seedStripFromWallpaper(self) }
+        // A bar that never hides draws no strip, so it samples nothing.
+        if autohide {
+            backdropStrip = loadStrips(self)[wallpaperKey()].map { [$0] } ?? []
+            if backdropStrip.isEmpty { backdropStrip = seedStripFromWallpaper(self) }
+        }
         window.orderFrontRegardless()
         // A sliding surface starts hidden, and a slide has to start from
         // somewhere. Park it above the top edge here, so the first move a
@@ -3738,15 +3718,13 @@ func safeTop(for display: CGRect) -> CGFloat {
 
 func fullscreenDisplays() -> Set<CGDirectDisplayID> {
     var covered: Set<CGDirectDisplayID> = []
-    // Under OmniWM the width test below cannot separate a tiled window
-    // from a fullscreen one: its 0.6.3 dwindle applies no outer gaps
-    // (resolved settings say 42, layout applies 0 — upstream bug, see
-    // docs/omniwm-port.md), so ordinary tiles take the side gaps too
-    // and EVERYTHING reads as fullscreen — the bar lived in
-    // hover-reveal permanently. Until the gap bug is fixed the bar
-    // stays visible under OmniWM, accepting that it overlaps a real
-    // fullscreen window instead of ducking away.
-    if omniwmActive() { return covered }
+    // No OmniWM exemption. It existed because 0.6.3's dwindle applied no
+    // outer gaps, so every tile read as fullscreen. OmniWM 0.7.2 applies
+    // them, so a tile starts below the top gap and fails the top-edge test
+    // below, while a native fullscreen window at 0,0 passes. Without this
+    // check under OmniWM, a window going native fullscreen had the bar
+    // (level 20, above normal windows) drawn over it until the space
+    // switch: a visible flash.
     guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
     else { return covered }
     var ids = [CGDirectDisplayID](repeating: 0, count: 8)
@@ -3767,7 +3745,13 @@ func fullscreenDisplays() -> Set<CGDirectDisplayID> {
             // ordinary tiled Arc reads as fullscreen. WIDTH is what
             // separates them — `--no-outer-gaps` means exactly that, the
             // window takes the side gaps too, and a tiled one never does.
-            if rect.origin.y - display.origin.y < inset + 3,
+            // Both edges, both sides. `intersects` is true for a window
+            // overlapping the display by one point, and OmniWM parks the
+            // workspaces you are not looking at at FULL SIZE one point onto a
+            // display edge: 1439,0, or -1439,0 with a second display to the
+            // right. Such a window is not on screen and must not count.
+            if (-2 ..< inset + 3).contains(rect.origin.y - display.origin.y),
+               abs(rect.origin.x - display.origin.x) < 2,
                rect.height >= display.height - inset - 6,
                rect.width >= display.width - 2 {
                 covered.insert(ids[i])
@@ -3791,80 +3775,30 @@ let barBaseLevel = NSWindow.Level(rawValue: -20)
 // At .statusBar the shroud covered all but the bottom 2 px of the bar —
 // which looked like macOS chrome winning, and was our own daemon.
 let barRevealLevel = NSWindow.Level(rawValue: 1002)
+// Where a bar that does not auto-hide rests. At -20 any window above it
+// buries it, invisible ones included: LanguageTool for Desktop keeps two
+// full-screen overlays at layer 3, and the bar was on screen, drawing, and
+// not visible. At 1002 it is in front of the native menu bar (24), and a
+// transparent bar there lets the native titles read through its pills, which
+// took a timer asking macOS where its bar was. At 20 it clears app overlays
+// and stays under the native menu bar, which covers it by itself.
+let barRestLevel = NSWindow.Level(rawValue: 20)
 let revealEdge: CGFloat = 2 // how close to the top edge counts as asking
-// How far down the strip the native bar is worth asking about. Outside it
-// macOS has never had its bar on screen, so a pointer crossing the middle
-// of the display asks nothing.
-let yieldWatch: CGFloat = barHeight + 12
+// How far below the top edge the pointer must go before a revealed bar
+// goes away again.
+let revealRelease: CGFloat = barHeight + 12
 
-// Is the NATIVE menu bar on screen on this display, right now?
-//
-// Two SkyLight calls and no window list walk. The display's UUID names its
-// current space and menu bar visibility is a property of a space, so the
-// answer is per display — which it has to be, because macOS reveals its bar
-// on the display the pointer is on and leaves the others alone.
-func nativeMenuBarRevealed(on screen: NSScreen) -> Bool {
+// A native fullscreen space on this display. There macOS draws its own black
+// menu bar on a top-edge hover, as on any Mac, and this bar stays out of it:
+// no reveal, and no strip capture, which would read that black bar as the
+// wallpaper's colour. Space type 4 is a fullscreen space; 0 is a desktop.
+func inNativeFullscreen(_ screen: NSScreen) -> Bool {
     guard let uuid = CGDisplayCreateUUIDFromDisplayID(screenID(screen))?.takeRetainedValue(),
           let name = CFUUIDCreateString(nil, uuid) else { return false }
     let space = SLSManagedDisplayGetCurrentSpace(SLSMainConnectionID(), name)
-    guard space != 0 else { return false }
-    return SLSIsMenuBarVisibleOnSpace(SLSMainConnectionID(), space)
+    return space != 0 && SLSSpaceGetType(SLSMainConnectionID(), space) == 4
 }
 
-// Stand aside if, and only if, the native bar is actually on screen.
-//
-// The rule used to be a distance, `fromTop <= revealEdge`, 2 points. macOS
-// uses its own and it is not that one: measured by gliding the pointer up
-// the screen a point at a time, its bar drops at fromTop <= 4 and stays
-// down long past the strip. Stop the pointer anywhere in between and the
-// native bar was down while this one stayed put in front of it, showing
-// through the gaps between the pills. Threshold against threshold could
-// only ever be close; this asks the window server the question itself.
-//
-// The asking OUTLIVES the move, because neither transition has happened yet
-// when the pointer stops. macOS takes about 100ms to drop its bar — 94, 97
-// and 105ms over three runs — and about 200ms to take it back once the
-// pointer has settled somewhere else, and no further move is coming to ask
-// on. Park the pointer just below the strip and the answer at move time is
-// "still down"; ask only then and the bar never comes back at all.
-//
-// So each move asks for the next 0.6s, and goes on asking for as long as
-// this bar is still aside. Both ends terminate: the grace period expires,
-// and `yielded` is cleared by the answer this loop is waiting for.
-//
-// The sequence number drops the repeats of a move a later one has overtaken,
-// so a pointer crossing the strip leaves one asker behind, not one per move.
-//
-// Two rates, because the two waits are not the same wait. Inside the grace
-// period something is settling and the answer is worth 0.08s: later than
-// that and this bar is still there when the native one finishes its 167ms
-// drop, which is the overlap being fixed. Once aside, the only thing left
-// to wait for is the native bar going away — and the ordinary way that
-// happens is the pointer leaving, which is a move, which asks at once and
-// starts a fresh grace period of its own. The slow rate is for the native
-// bar leaving with the pointer parked: Escape, a space switch, an app going
-// fullscreen. A quarter of a second is soon enough for those, and it is
-// what keeps a pointer left in the native menu bar from polling at 12Hz for
-// as long as it sits there. Measured parked for 30s at this rate: 0.02s and
-// 0.04s of CPU, about a tenth of one per cent of a core.
-let followStep: TimeInterval = 0.08
-let followIdle: TimeInterval = 0.25
-let followGrace: TimeInterval = 0.6
-
-func followNativeBar(_ surface: BarSurface) {
-    surface.followSeq += 1
-    askNativeBar(surface, seq: surface.followSeq, until: Date() + followGrace)
-}
-
-func askNativeBar(_ surface: BarSurface, seq: Int, until: Date) {
-    guard surface.followSeq == seq else { return }
-    setYielded(nativeMenuBarRevealed(on: surface.screen), on: surface)
-    let settling = Date() < until
-    guard settling || surface.yielded else { return }
-    DispatchQueue.main.asyncAfter(deadline: .now() + (settling ? followStep : followIdle)) {
-        askNativeBar(surface, seq: seq, until: until)
-    }
-}
 // macOS does not start collapsing the native menu bar the instant the
 // pointer leaves it. It waits, and a bar that does not wait is ahead of it
 // for the whole travel, which is exactly when the native bar shows.
@@ -3881,13 +3815,6 @@ func askNativeBar(_ surface: BarSurface, seq: Int, until: Date) {
 // A constant, not a fraction of the slide: it answers the system's own
 // delay, which does not change when slide= does.
 let exitHold: TimeInterval = 0.05
-
-// How long the native menu bar takes to collapse once the pointer leaves the
-// top edge. It does not vanish, it travels, and it travels BEHIND this bar,
-// so coming back the instant the hover ends shows it retreating underneath —
-// exactly the overlap the stand-aside exists to avoid. Measured at 167ms for
-// the same travel in the other direction; 0.2 covers it with a frame spare.
-let nativeCollapse: TimeInterval = 0.2
 
 func setRevealed(_ show: Bool, on surface: BarSurface) {
     guard show != surface.revealed else { return }
@@ -3914,43 +3841,6 @@ func setRevealed(_ show: Bool, on surface: BarSurface) {
     updateBarVisibility(surface)
 }
 
-// Notched displays only. The bar is visible at rest and hiding it reclaims
-// no screen, so the left half is a deliberate no-op and the right half's
-// only useful action is to get out of the way.
-// Standing aside is immediate; coming back is not.
-//
-// The native bar is drawn by the window server above this one, so while it is
-// up it covers this bar completely — which is the whole point. On the way out
-// it COLLAPSES rather than disappearing, and it collapses behind this bar, so
-// returning at once puts this bar in front of a native bar that is still
-// travelling and the retreat is visible through it. Held for the collapse,
-// this bar returns to a strip the native one has already left.
-//
-// The sequence number cancels a pending return: go back to the top edge
-// during the hold and the bar simply stays aside, which is where it was
-// going anyway.
-func setYielded(_ yield: Bool, on surface: BarSurface) {
-    if yield {
-        // Bumped only HERE. Going back to the top edge is the one thing that
-        // should cancel a pending return; a repeated request to come back is
-        // not, and bumping on those cancelled the return each time it was
-        // asked for. pointerAtScreenTop asks on every move below the
-        // threshold, so the bar never came back at all.
-        surface.yieldSeq += 1
-        guard !surface.yielded else { return }
-        surface.yielded = true
-        updateBarVisibility(surface)
-        return
-    }
-    guard surface.yielded else { return }
-    let seq = surface.yieldSeq
-    DispatchQueue.main.asyncAfter(deadline: .now() + nativeCollapse) {
-        guard surface.yieldSeq == seq, surface.yielded else { return }
-        surface.yielded = false
-        updateBarVisibility(surface)
-    }
-}
-
 // Called on every pointer move, so it stays a coordinate comparison and
 // nothing more.
 func pointerAtScreenTop() {
@@ -3972,7 +3862,9 @@ func pointerAtScreenTop() {
             surface.atTopEdge = true
             surface.latchedBar = p.x < screen.frame.minX + screen.frame.width * barConf.split
         }
-        if surface.autohide {
+        if inNativeFullscreen(screen) {
+            // only the native menu bar, as macOS draws it in this mode
+        } else if surface.autohide {
             // Left half asks for this bar. Right half is left alone, so the
             // native bar arrives by itself and its status-item-only apps
             // are reachable.
@@ -4013,35 +3905,12 @@ func pointerAtScreenTop() {
         } else if fullscreenDisplays().contains(screenID(screen)) {
             // Hidden under a fullscreen window: climbing out is how this bar
             // comes back, and that is what a top-edge hover should do here.
-            // It takes priority over standing aside, because there is nothing
-            // to stand aside FROM while the bar is not on screen.
             setRevealed(true, on: surface)
         }
-    } else if fromTop > yieldWatch {
+    } else if fromTop > revealRelease {
         surface.atTopEdge = false
         // a popup keeps it up: its anchor must not vanish under the pointer
         if surface.revealed, openPopup == nil { setRevealed(false, on: surface) }
-    }
-    // Standing aside is asked OUTSIDE the distance test, because it is not a
-    // distance question. It is also not a question about which half of the
-    // edge the pointer entered: the split exists for an auto-hiding bar,
-    // where the two take turns in an empty strip and the half you enter
-    // decides which one arrives. A bar that never hides already occupies
-    // that strip, so the only question is whether the native one is covering
-    // it.
-    //
-    // `!surface.revealed` leaves the fullscreen path alone: a bar that has
-    // just climbed out from under a fullscreen window has nothing to stand
-    // aside from, and yielding would put it straight back under.
-    //
-    // `|| other.yielded` keeps asking after the pointer has left the band,
-    // which is how a bar that stood aside comes back.
-    //
-    // Every display's bar asks, not only the one under the pointer: a hover
-    // on one display can bring the native bar down on another as well.
-    for other in surfaces where !other.autohide && !other.revealed
-        && (fromTop <= yieldWatch || other.yielded) {
-        followNativeBar(other)
     }
 }
 
@@ -4124,44 +3993,18 @@ func updateBarVisibility() {
 }
 
 func updateBarVisibility(_ surface: BarSurface, covered: Set<CGDirectDisplayID>? = nil) {
-    // With autohide false this is the shipped rule exactly, plus the yield,
-    // which cannot fire unless something asks for it. Nobody who does not
-    // opt in sees a change. An auto-hiding surface never asks whether a
-    // fullscreen window covers it: hidden is already its resting state.
-    // `yielded` means this bar stood aside so the native one could be used.
-    // It is set and cleared from pointerAtScreenTop, which runs on a global
-    // .mouseMoved monitor. Use the native menu and then reach for the
-    // keyboard — switch workspace, open a window — and the bar stayed stood
-    // aside indefinitely, with nothing on screen to explain it. Measured:
-    // warp the pointer to the middle of the display and switch workspace,
-    // and the bar is still gone; one real mouse move brings it back.
-    //
-    // Re-checked here instead, where visibility is decided, so ANY trigger
-    // undoes it and not just a move.
-    //
-    // The check is THIS SCREEN's native bar, not the pointer's distance from
-    // this screen's top edge. The distance form read the pointer wherever it
-    // was: with the displays' tops aligned, as they are here, it could not
-    // bite, but one display sitting higher than the other would have cleared
-    // one bar's yield because of a pointer on the other screen.
-    if surface.yielded, !nativeMenuBarRevealed(on: surface.screen) {
-        // Through setYielded, so this takes the collapse hold as well. It
-        // leaves `yielded` true for now and the bar stays aside for this
-        // pass, which is right: the native bar may still be travelling.
-        setYielded(false, on: surface)
-    }
+    // With autohide false this is the shipped rule exactly. An auto-hiding
+    // surface never asks whether a fullscreen window covers it: hidden is
+    // already its resting state.
     let hide: Bool
-    if surface.autohide {
+    if inNativeFullscreen(surface.screen) {
+        // macOS shows its own black menu bar here, and only that
+        hide = true
+    } else if surface.autohide {
         hide = !surface.revealed
     } else {
         let cov = covered ?? fullscreenDisplays()
-        // `revealed` outranks both reasons to be hidden, and it has to. It
-        // is set on one display only, by a top-edge hover on a display a
-        // fullscreen window has covered, and it means "the user asked for
-        // this bar". Standing aside is asked on the way to that edge, so
-        // reaching it with `yielded` set — which is the ordinary approach —
-        // left the reveal with nothing to show.
-        hide = !surface.revealed && (surface.yielded || cov.contains(screenID(surface.screen)))
+        hide = !surface.revealed && cov.contains(screenID(surface.screen))
     }
     // unconditional either way: isVisible can desync from the window
     // server, which is how borders.swift ended up with a stuck shroud. A
@@ -4180,20 +4023,8 @@ func updateBarVisibility(_ surface: BarSurface, covered: Set<CGDirectDisplayID>?
         // the stored fill only lands a few frames later — which is the
         // ramp this whole cache exists to remove.
         surface.view.display()
-        // A bar that does not auto-hide has to be raised, and stay raised.
-        // The resting level is -20, below normal windows, so a fullscreen
-        // window covers it for free — right for a bar that is only ever seen
-        // while revealed, and wrong for one that is meant to be seen always:
-        // ANY window at a layer above -20 buries it, including ones that are
-        // invisible. Measured here, LanguageTool for Desktop keeps two
-        // full-screen overlays at layer 3, and with autohide=off the bar was
-        // on screen, drawing, and not visible anywhere on the display.
-        //
-        // Nothing is given away by raising it. aerospace's outer.top already
-        // keeps tiled windows off the strip when the bar stays visible, which
-        // is the same gap that makes room for it, so there is nothing left
-        // for it to float over.
-        if !surface.autohide { surface.window.level = barRevealLevel }
+        // A bar that does not auto-hide rests at barRestLevel: see there.
+        if !surface.autohide && !surface.revealed { surface.window.level = barRestLevel }
         if surface.slides, surface.slide != .down {
             slideBar(surface, reveal: true)
         } else {
@@ -4628,9 +4459,17 @@ func rebuildSubscriptions() {
 // a fullscreen check is a window-list read, not a subprocess: cheap
 // enough to run on a short debounce after any window event
 var visibilityPending: DispatchWorkItem?
+var lastVisibilityCheck = Date.distantPast
 func kickVisibility() {
+    // Also at the FIRST event, then at most every 0.1s. A window animating
+    // into native fullscreen sends a stream of move and resize events, and a
+    // check that only runs once they stop left the bar over it for 0.94s.
+    if Date().timeIntervalSince(lastVisibilityCheck) >= 0.1 {
+        lastVisibilityCheck = Date()
+        updateBarVisibility()
+    }
     visibilityPending?.cancel()
-    let work = DispatchWorkItem { updateBarVisibility() }
+    let work = DispatchWorkItem { lastVisibilityCheck = Date(); updateBarVisibility() }
     visibilityPending = work
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
 }
@@ -4700,8 +4539,10 @@ watch(stateDir, create: false) {
     guard now != seededWallpaper else { return }
     seededWallpaper = now
     let t0 = DispatchTime.now().uptimeNanoseconds
-    // Everything the seed needs, read HERE, on the main queue.
-    let jobs = surfaces.map { ($0, $0.screen.frame, screenID($0.screen)) }
+    // Everything the seed needs, read HERE, on the main queue. Only an
+    // auto-hiding bar draws a strip, so only it is seeded.
+    let jobs = surfaces.filter { $0.autohide }.map { ($0, $0.screen.frame, screenID($0.screen)) }
+    guard !jobs.isEmpty else { return }
     let url = URL(fileURLWithPath: now)
     // OFF the main queue, the same rule the rebuild path follows. An
     // uncached seed decodes a whole image, measured at 60 to 115ms, and
@@ -4747,7 +4588,7 @@ watch(stateDir, create: false) {
             // is elsewhere, because the guards reject immediately.
             for delay in [0.8, 1.8, 3.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    for surface in surfaces { captureOwnStrip(surface) }
+                    for surface in surfaces where surface.autohide { captureOwnStrip(surface) }
                 }
             }
             let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
@@ -4878,6 +4719,11 @@ locationGate.start()
 
 // bluetooth: gated on the privacy grant, which the watcher above also needs
 bluetoothWatcher.start()
+
+// entering or leaving a native fullscreen space: hide or show the bar at once
+NSWorkspace.shared.notificationCenter.addObserver(
+    forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+) { _ in updateBarVisibility() }
 
 // waking clears the gamma table, so the shade has to be reasserted
 NSWorkspace.shared.notificationCenter.addObserver(

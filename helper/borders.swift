@@ -17,6 +17,18 @@
 // deliver nothing without it.
 import AppKit
 
+// install.sh calls `omacosy-borders --request-accessibility` once, at install
+// time, for the optional Accessibility grant. The daemon never prompts: with
+// KeepAlive, prompting at launch would ask again at every login for a user who
+// declined. Without the grant the ring falls back to watchAfterClick.
+if CommandLine.arguments.contains("--request-accessibility") {
+    if !AXIsProcessTrusted() {
+        _ = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+    }
+    exit(0)
+}
+
 // --- SkyLight externs ---------------------------------------------------
 
 typealias NotifyProc = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?) -> Void
@@ -144,6 +156,10 @@ var focusMayHaveChanged = true
 //
 // Close and quit fade it over ~250 ms: alpha falls below that window's own
 // peak, which leaves windows that are translucent by design alone.
+//
+// It sees a fade, not a close: an app that dims its own window (a video
+// overlay, a brightness shutter) also falls below the peak and loses the
+// ring until the next focus change.
 //
 // Minimize keeps it opaque and shrinks it into the Dock; event 1327 marks
 // its start (see minimizeBegan).
@@ -769,11 +785,14 @@ let axDestroyed: AXObserverCallback = { _, _, _, refcon in
 }
 
 func watchClose(_ wid: UInt32) {
+    // trust first: recording axWatchWid before this check would swallow the
+    // window when the grant arrives mid-run, leaving it unwatched until focus
+    // moved.
+    guard wid != 0, AXIsProcessTrusted() else { return }
     guard wid != axWatchWid else { return }
     axWatchWid = wid
-    guard wid != 0, AXIsProcessTrusted(),
-        let pid = (CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]])?
-            .first?["kCGWindowOwnerPID"] as? pid_t else { return }
+    guard let pid = (CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]])?
+        .first?["kCGWindowOwnerPID"] as? pid_t else { return }
     if pid != axObserverPid || axObserver == nil {
         if let old = axObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(old), .defaultMode)
@@ -825,8 +844,10 @@ func watchAfterClick() {
 let clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { _ in
     if !AXIsProcessTrusted() { watchAfterClick() }
 }
-// ask once at startup; macOS shows its own prompt when the grant is missing
-_ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+// The Accessibility prompt is asked once, by install.sh
+// (--request-accessibility), never here: the daemon only checks
+// AXIsProcessTrusted() (watchClose, the click monitor), so a declined grant
+// is not re-asked at every login.
 
 // safety net for anything eventless (subscription races, missed
 // events): cheap at this cadence, and the only whole-list poll

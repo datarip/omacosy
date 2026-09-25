@@ -90,7 +90,9 @@ rules = slot_rules + [
     # the guest workspaces too on a single display
     rule("next workspace", "tab", SUPER, cmd=f"{home}/.local/bin/omacosy-ws next"),
     rule("previous workspace", "tab", SHIFT, cmd=f"{home}/.local/bin/omacosy-ws prev"),
-    rule("files", "f", SHIFT, cmd="open -a Finder"),
+    # a new Finder window per press, through the same spawn lock and
+    # preselect as the terminal; `open -a Finder` only raises one
+    rule("files", "f", SHIFT, cmd=f"{home}/.local/bin/omacosy-finder-window"),
     rule("music", "m", SHIFT, cmd=f"open -a '{apps['MUSIC']}'"),
     rule("messenger", "g", SHIFT, cmd=f"open -a '{apps['MESSENGER']}'"),
     # yazi, only where it is installed (see omacosy-files)

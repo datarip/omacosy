@@ -9,11 +9,18 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 usage() {
   cat <<'EOF'
-usage: ./install.sh [--aerospace | --omniwm]
+usage: ./install.sh [--aerospace | --omniwm] [--yazi | --yazi-full]
 
   (no option)   keep the window manager this Mac runs; AeroSpace on a new Mac
   --aerospace   install and run AeroSpace
   --omniwm      install and run OmniWM; AeroSpace is not installed
+  --yazi        also install yazi, a file manager on Super+Shift+Y, with the
+                helpers it previews and searches with (fd, poppler, resvg,
+                sevenzip)
+  --yazi-full   the same, plus ffmpeg-full and imagemagick-full for video
+                thumbnails and raw photos (large: ~160 dependencies)
+                Both are off by default; uninstall.sh removes what they
+                added.
 
 The other window manager installs on first use:
   omacosy-wm-switch omniwm | aerospace
@@ -21,10 +28,14 @@ EOF
 }
 
 WM_FLAG=
+WITH_YAZI=0
+YAZI_FULL=0
 for arg in "$@"; do
   case "$arg" in
     --aerospace) WM_FLAG=aerospace ;;
     --omniwm) WM_FLAG=omniwm ;;
+    --yazi) WITH_YAZI=1 ;;
+    --yazi-full) WITH_YAZI=1; YAZI_FULL=1 ;;
     -h | --help) usage; exit 0 ;;
     *) printf 'install.sh: unknown option: %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
   esac
@@ -106,7 +117,35 @@ if ! brew bundle --file="$REPO_DIR/Brewfile"; then
   log "WARNING: some Homebrew packages failed to install (see above)."
   log "  Continuing — re-run install.sh after resolving them."
 fi
-# record only packages that brew bundle ACTUALLY added
+# yazi is opt-in (--yazi): most users never ask for a second file manager.
+# Only what this Mac lacks is installed. It runs before the marking below,
+# so yazi and every dependency it pulls in are recorded, and uninstall.sh
+# takes away exactly that. Once yazi is here, Super+Shift+Y is bound on
+# every later run, flag or not.
+if [ "$WITH_YAZI" = 1 ]; then
+  YAZI_PKGS="yazi fd poppler resvg sevenzip"
+  [ "$YAZI_FULL" = 1 ] && YAZI_PKGS="$YAZI_PKGS ffmpeg-full imagemagick-full"
+  log "Installing yazi and its preview helpers ($YAZI_PKGS)"
+  for f in $YAZI_PKGS; do
+    brew list --formula "$f" >/dev/null 2>&1 && continue
+    brew install "$f" || log "WARNING: could not install $f"
+  done
+  # The -full builds are keg-only: linked over any plain ffmpeg or
+  # imagemagick, or yazi keeps finding the plain one and its missing codecs.
+  # A plain one the user has is recorded, so uninstall.sh links it again.
+  if [ "$YAZI_FULL" = 1 ]; then
+    for f in ffmpeg imagemagick; do
+      brew list --formula "$f-full" >/dev/null 2>&1 || continue
+      if brew list --formula "$f" >/dev/null 2>&1; then
+        mark "brew-relink $f"
+        log "Linking $f-full over your $f; uninstall.sh links $f again"
+      fi
+      brew link "$f-full" -f --overwrite >/dev/null 2>&1 || log "WARNING: could not link $f-full"
+    done
+  fi
+fi
+
+# record only packages that brew bundle or the yazi block ACTUALLY added
 comm -13 <(printf '%s\n' "$PRE_FORMULAE") <(brew list --formula 2>/dev/null | sort) \
   | while read -r f; do [ -n "$f" ] && mark "brew-formula $f"; done
 comm -13 <(printf '%s\n' "$PRE_CASKS") <(brew list --cask 2>/dev/null | sort) \
@@ -256,8 +295,11 @@ read_apps() {
 }
 read_apps "$REPO_DIR/config/apps.conf"
 read_apps "$REPO_DIR/config/apps.local.conf"
+# Super+Shift+Y is bound only where yazi is installed: an optional tool gets
+# no chord that can only fail. Installing it later takes a re-run.
+if command -v yazi >/dev/null 2>&1 || [ -x /opt/homebrew/bin/yazi ]; then YAZI_LINE='s|^#yazi# ||'; else YAZI_LINE='/^#yazi# /d'; fi
 sed -e "s|@TERMINAL@|$TERMINAL|g" -e "s|@BROWSER@|$BROWSER|g" \
-    -e "s|@MUSIC@|$MUSIC|g" -e "s|@MESSENGER@|$MESSENGER|g" \
+    -e "s|@MUSIC@|$MUSIC|g" -e "s|@MESSENGER@|$MESSENGER|g" -e "$YAZI_LINE" \
   "$REPO_DIR/config/aerospace/aerospace.template.toml" > "$REPO_DIR/config/aerospace/aerospace.toml"
 
 log "Linking configs"
@@ -454,6 +496,7 @@ link "$REPO_DIR/bin/theme-set"  "$HOME/.local/bin/theme-set"
 link "$REPO_DIR/bin/theme-next" "$HOME/.local/bin/theme-next"
 link "$REPO_DIR/bin/theme-bg-next" "$HOME/.local/bin/theme-bg-next"
 link "$REPO_DIR/bin/omacosy-toggle" "$HOME/.local/bin/omacosy-toggle"
+link "$REPO_DIR/bin/omacosy-files" "$HOME/.local/bin/omacosy-files"
 link "$REPO_DIR/bin/omacosy-ws" "$HOME/.local/bin/omacosy-ws"
 link "$REPO_DIR/bin/omacosy-focus-guard" "$HOME/.local/bin/omacosy-focus-guard"
 link "$REPO_DIR/bin/omacosy-ws-collapse" "$HOME/.local/bin/omacosy-ws-collapse"

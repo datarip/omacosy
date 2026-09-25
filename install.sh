@@ -507,8 +507,9 @@ cat > "$FFM_APP/Contents/Info.plist" <<PLIST
 PLIST
 ln -sfn "$FFM_BIN" "$HOME/.local/bin/omacosy-ffm"
 
-# focused-window border ring (replaces JankyBorders; no permissions;
-# SkyLight for the window-server event notifications)
+# focused-window border ring (replaces JankyBorders; SkyLight for the
+# window-server event notifications; the optional Accessibility grant only
+# lets it hear a close at once — see the README permissions table)
 if [ ! -x "$HOME/.local/bin/omacosy-borders" ] || [ "$REPO_DIR/helper/borders.swift" -nt "$HOME/.local/bin/omacosy-borders" ]; then
   log "Building omacosy-borders (grant Accessibility when prompted)"
   swiftc -O -F /System/Library/PrivateFrameworks -framework SkyLight -o "$HOME/.local/bin/omacosy-borders" "$REPO_DIR/helper/borders.swift"
@@ -528,6 +529,10 @@ clear_if_changed omacosy-ffm com.omacosy.ffm
 # the makefile re-signs ad-hoc as part of the build, so signing here
 # would be overwritten and every rebuild would invalidate the
 # Accessibility grant again)
+
+# (the optional Accessibility grant is asked by omacosy-borders itself, once,
+# at daemon startup — see helper/borders.swift. Calling it from here put the
+# prompt on the terminal, so the grant landed on the terminal's entry.)
 
 # hover-ignore list (launchd agents can't read ~/Documents — copied)
 mkdir -p "$HOME/.config/omacosy"

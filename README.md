@@ -576,8 +576,11 @@ copy of anything.
 ## Back to a normal Mac
 
 ```sh
-./uninstall.sh
+~/.local/share/omacosy/uninstall.sh
 ```
+
+If you cloned omacosy somewhere else, run `<your clone>/uninstall.sh`.
+The script finds the clone from its own path.
 
 Manifest-driven: `install.sh` records what this machine actually gained
 (Homebrew packages that weren't already present, cloned repos, every
@@ -585,6 +588,35 @@ Manifest-driven: `install.sh` records what this machine actually gained
 exactly that. Tools and settings you had before omacosy are never
 touched. Pre-manifest installs fall back to a conservative teardown
 that leaves all Homebrew packages in place.
+
+Before it removes anything, the script saves your omacosy settings, the
+record of this install and your `karabiner.json` in
+`~/omacosy-backup-<date>-<time>/`. It prints that folder's path at the end.
+
+After the script, do these steps in this order:
+
+1. Close the terminal window and open a new one. The old window still
+   uses omacosy's shell setup, and some of the programs it calls are gone.
+2. Optional: delete the clone. The script keeps it, and nothing breaks
+   if it stays. With the clone kept, a reinstall is one command. To
+   delete it, run `rm -rf <your clone>`. The default clone is
+   `~/.local/share/omacosy`.
+3. If omacosy installed Homebrew, the script says so. To remove Homebrew
+   too, use Homebrew's own uninstall script. Homebrew packages you had
+   before omacosy stay installed.
+4. In System Settings → General → Login Items, remove AeroSpace if it is
+   still in the list.
+5. If you used the Caps Lock dictation shortcut in the Claude desktop app,
+   turn it on again in Claude's settings. The install removed it.
+6. Optional: in System Settings → Privacy & Security, delete the entries
+   omacosy added. The [permissions table](#permissions) lists each one
+   and the program it names. No script can remove them, and they do
+   nothing once the programs are gone.
+7. Log out and log in again. The native menu bar comes back fully only
+   then.
+
+To stop omacosy for a while without removing it, see
+[Parking the setup](#parking-the-setup).
 
 ## License & credits
 

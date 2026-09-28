@@ -624,7 +624,8 @@ wallpaper — hiding the overlay when macOS has caught up with the same picture,
 so the handoff is invisible. A few seconds with no further press
 (`OMACOSY_SETTLE_SECONDS`, default 4) is taken as the choice; the wallpaper
 request itself is never stacked. It works the same for the four shipped themes
-and for `custom`.
+and for `custom`. [docs/theme-switching.md](docs/theme-switching.md) has the
+problem, the rejected options and the measurements.
 
 Each theme ships omarchy's full wallpaper set. `Super+Shift+B` (or
 `theme-bg-next`) cycles through them; `theme-bg-next <path>` sets any

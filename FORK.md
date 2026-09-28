@@ -32,6 +32,8 @@ requests are where they can become everyone's. See
 | Overview | the overview follows a theme or wallpaper change, open or closed, and shows the desktop's wallpaper | `helper/overview.swift` |
 | Gestures | the OmniWM swipe config no longer points at another user's home | `config/gesture/` |
 | Gestures | the trackpad arms at once when OmniWM is the manager | `helper/gesture/` |
+| Undock | the fold map survives an OmniWM restart, so folded windows still return to their workspace | `bin/omacosy-ws-collapse` |
+| Undock | the restore never drops a live window's record when no window manager answers | `bin/omacosy-ws-collapse` |
 
 ### Features, each also a pull request upstream
 

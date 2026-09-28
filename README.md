@@ -350,6 +350,7 @@ The commands you run:
 | `theme-set <name>` | switches the whole theme |
 | `theme-next` | the next theme (Super+Shift+T) |
 | `theme-bg-next [path]` | the next wallpaper of the theme, or the image you name (Super+Shift+B) |
+| `omacosy-theme-switch theme\|wallpaper` | what Super+Shift+T and B run: the theme and the wallpaper change instantly and in sync (see Themes) |
 
 The keys and the daemons run these. You do not need to run them:
 
@@ -362,7 +363,8 @@ The keys and the daemons run these. You do not need to run them:
 | `omacosy-spawn`, `omacosy-spawn-cmd` | the launch chords: one new window at a time |
 | `omacosy-finder-window` | Super+Shift+F: a new Finder window on this workspace |
 | `omacosy-files` | Super+Shift+Y: yazi in a new terminal window |
-| `omacosy-auto-theme apply` | `theme-set` and `theme-bg-next`, when auto-theme is on |
+| `omacosy-auto-theme apply` | `theme-set`, `theme-bg-next` and `omacosy-theme-switch`, when auto-theme is on |
+| `omacosy-theme-switch` | Super+Shift+T and Super+Shift+B: the instant, synced switch |
 | `omacosy-focus-guard` | AeroSpace, on each workspace change: it undoes a switch that an app caused by activating itself |
 | `omacosy-ws-collapse` | the bar, when a display is unplugged or plugged back in |
 | `omacosy-karabiner-omniwm` | `omacosy-wm-switch` and `omacosy-settings`: the launch chords under OmniWM |
@@ -612,6 +614,17 @@ individually, so anything you opened while undocked stays put.
 on every display, and any terminal that follows omarchy's
 `~/.config/omarchy/current/theme` convention (the upstream author's does).
 `Super+Shift+T` cycles.
+
+`Super+Shift+T` and `Super+Shift+B` run `omacosy-theme-switch`, which makes
+the switch instant and in sync. macOS takes about 4.5 s to paint a new desktop
+picture; omacosy instead draws the chosen wallpaper itself, in a desktop-level
+window, in about 0.15 s (`helper/overlay.swift`), recolours the bar and the
+focus ring the moment it is on screen, and only then asks macOS for the real
+wallpaper — hiding the overlay when macOS has caught up with the same picture,
+so the handoff is invisible. A few seconds with no further press
+(`OMACOSY_SETTLE_SECONDS`, default 4) is taken as the choice; the wallpaper
+request itself is never stacked. It works the same for the four shipped themes
+and for `custom`.
 
 Each theme ships omarchy's full wallpaper set. `Super+Shift+B` (or
 `theme-bg-next`) cycles through them; `theme-bg-next <path>` sets any

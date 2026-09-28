@@ -21,9 +21,15 @@ custom theme `apply` does what it does on a stock theme for the apps. Every
 generated file is removed and each app shows its own colours. `on` alone sets
 `apps = on` again and links the Neovim plugin back.
 
-`theme-set` and `theme-bg-next` call `omacosy-auto-theme apply <label>` after
-they repoint `~/.config/omarchy/current/theme`. Nothing else calls it, except
-tmux, which runs `omacosy-auto-theme tmux-bar` from its own config.
+`theme-set`, `theme-bg-next` and `omacosy-theme-switch` call
+`omacosy-auto-theme apply <label>` after they repoint
+`~/.config/omarchy/current/theme`. Nothing else calls it, except tmux, which
+runs `omacosy-auto-theme tmux-bar` from its own config.
+
+The two theme keys run `omacosy-theme-switch` (README, Themes), which applies
+this in step with the instant wallpaper switch: the terminal and its tools are
+told at the same moment the bar and ring are recoloured, instead of waiting
+for macOS to paint the wallpaper.
 
 **A stock theme is never changed.** When one of the shipped themes is on
 screen, `apply` removes every generated file, puts back the settings it

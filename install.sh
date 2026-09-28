@@ -644,6 +644,12 @@ if [ ! -x "$HOME/.local/bin/omacosy-borders" ] || [ "$REPO_DIR/helper/borders.sw
   log "Building omacosy-borders"
   swiftc -O -F /System/Library/PrivateFrameworks -framework SkyLight -o "$HOME/.local/bin/omacosy-borders" "$REPO_DIR/helper/borders.swift"
 fi
+# desktop-level wallpaper overlay: draws the chosen wallpaper in ~150ms while
+# macOS paints the real one. No grant needed.
+if [ ! -x "$HOME/.local/bin/omacosy-overlay" ] || [ "$REPO_DIR/helper/overlay.swift" -nt "$HOME/.local/bin/omacosy-overlay" ]; then
+  log "Building omacosy-overlay"
+  swiftc -O -o "$HOME/.local/bin/omacosy-overlay" "$REPO_DIR/helper/overlay.swift"
+fi
 # stable code identity so TCC grants survive rebuilds (skipped when no
 # signing identity works — then re-grant after each rebuild)
 sign "$HOME/.local/bin/omacosy-helper" com.omacosy.helper
@@ -745,6 +751,22 @@ PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.solo.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.omacosy.solo.plist"
 
+cat > "$HOME/Library/LaunchAgents/com.omacosy.overlay.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.omacosy.overlay</string>
+  <key>ProgramArguments</key><array><string>$HOME/.local/bin/omacosy-overlay</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardErrorPath</key><string>/tmp/omacosy-overlay.err</string>
+</dict>
+</plist>
+PLIST
+launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.overlay.plist" 2>/dev/null || true
+launchctl load "$HOME/Library/LaunchAgents/com.omacosy.overlay.plist"
+
 # Light/dark follower for the day= and night= keys. A poll rather than a
 # daemon: this has to do nothing on almost every machine, and a script
 # that exits in milliseconds once a minute costs less than a resident
@@ -811,6 +833,7 @@ launchctl load "$HOME/Library/LaunchAgents/com.omacosy.bar.plist"
 link "$REPO_DIR/bin/theme-set"  "$HOME/.local/bin/theme-set"
 link "$REPO_DIR/bin/theme-next" "$HOME/.local/bin/theme-next"
 link "$REPO_DIR/bin/theme-bg-next" "$HOME/.local/bin/theme-bg-next"
+link "$REPO_DIR/bin/omacosy-theme-switch" "$HOME/.local/bin/omacosy-theme-switch"
 link "$REPO_DIR/bin/omacosy-custom-theme" "$HOME/.local/bin/omacosy-custom-theme"
 link "$REPO_DIR/bin/omacosy-auto-theme" "$HOME/.local/bin/omacosy-auto-theme"
 # the old name of omacosy-auto-theme; its link would point at nothing

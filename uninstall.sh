@@ -51,6 +51,8 @@ launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.dwindle.plist" 2>/dev/n
 rm -f "$HOME/Library/LaunchAgents/com.omacosy.dwindle.plist" "$HOME/.local/bin/omacosy-dwindle"
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.solo.plist" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.omacosy.solo.plist" "$HOME/.local/bin/omacosy-solo"
+launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.overlay.plist" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/com.omacosy.overlay.plist" "$HOME/.local/bin/omacosy-overlay"
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.appearance.plist" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.omacosy.appearance.plist"
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" 2>/dev/null || true
@@ -242,7 +244,7 @@ fi
 
 # theme-set / theme-next out of ~/.local/bin — only when they are OUR
 # symlinks (a user's own script of the same name survives)
-for t in theme-set theme-next theme-bg-next omacosy-custom-theme omacosy-auto-theme omacosy-term-sync omacosy-derive omacosy-appearance omacosy-ws omacosy-toggle omacosy-focus-guard omacosy-ws-collapse omacosy-float omacosy-cycle omacosy-update omacosy-spawn omacosy-layout omacosy-finder-window omacosy-solo-fullscreen omacosy-fullscreen omacosy-bar-autohide omacosy-wm-switch omacosy-karabiner-omniwm \
+for t in theme-set theme-next theme-bg-next omacosy-theme-switch omacosy-custom-theme omacosy-auto-theme omacosy-term-sync omacosy-derive omacosy-appearance omacosy-ws omacosy-toggle omacosy-focus-guard omacosy-ws-collapse omacosy-float omacosy-cycle omacosy-update omacosy-spawn omacosy-layout omacosy-finder-window omacosy-solo-fullscreen omacosy-fullscreen omacosy-bar-autohide omacosy-wm-switch omacosy-karabiner-omniwm \
          omacosy-settings omacosy-window-corners omacosy-spawn-cmd omacosy-harvest-zshrc; do
   target="$(readlink "$HOME/.local/bin/$t" 2>/dev/null || true)"
   case "$target" in *omacosy*) rm -f "$HOME/.local/bin/$t" ;; esac

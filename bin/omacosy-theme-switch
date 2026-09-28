@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|off] — switch a
+# theme instantly and in sync. Super+Shift+T and Super+Shift+B call this.
+#
+# Why it exists. theme-set changes the theme symlink first (the bar and the
+# ring repaint in ~15ms) and only then asks macOS for the wallpaper, which
+# takes 4.5s. The user sees the colours seconds before the picture. Here the
+# wallpaper is drawn at once in a desktop-level overlay (omacosy-overlay),
+# the bar/ring are relinked only once that overlay is actually on screen
+# (one frame later), and the real system wallpaper is applied quietly
+# afterwards, once the user has stopped pressing, under the overlay; the
+# overlay is removed the moment macOS catches up.
+#
+# State in ~/.local/state/omacosy:
+#   pending-theme, pending-wallpaper   the selection being browsed
+#   overlay, overlay-shown             the overlay's command / ack
+#   settler.pid                        the debounce worker
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+THEMES_DIR="$REPO_DIR/themes"
+CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
+AUTO_THEME="$REPO_DIR/bin/omacosy-auto-theme"
+HELPER="$HOME/.local/bin/omacosy-helper"
+OVERLAY_BIN="$HOME/.local/bin/omacosy-overlay"
+
+STATE_DIR="$HOME/.local/state/omacosy"
+CURRENT_LINK="$HOME/.config/omarchy/current/theme"
+OVERLAY_FILE="$STATE_DIR/overlay"
+SHOWN_FILE="$STATE_DIR/overlay-shown"
+TARGET_FILE="$STATE_DIR/overlay-target"
+PENDING_THEME="$STATE_DIR/pending-theme"
+PENDING_WALL="$STATE_DIR/pending-wallpaper"
+CUSTOM_INDEX="$STATE_DIR/custom-index"
+LAST_STOCK="$STATE_DIR/last-stock-theme"
+BACKGROUND_LINK="$STATE_DIR/background"
+SETTLER_PID="$STATE_DIR/settler.pid"
+APPLY_PID="$STATE_DIR/apply.pid"
+LOG="$STATE_DIR/switch.log"
+
+SETTLE_SECONDS="${OMACOSY_SETTLE_SECONDS:-4}"
+
+mkdir -p "$STATE_DIR"
+log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG"; }
+
+have_custom() { [ -x "$CUSTOM" ] && "$CUSTOM" dir >/dev/null 2>&1; }
+stock_themes() { for t in "$THEMES_DIR"/*/; do basename "$t"; done; }
+bgs_of() {
+  find -L "$1" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.heic' \) \
+    2>/dev/null | sort || true
+}
+
+current_logical() {
+  if [ -f "$PENDING_THEME" ]; then
+    local p; p="$(cat "$PENDING_THEME" 2>/dev/null || true)"
+    [ -n "$p" ] && { printf '%s' "$p"; return; }
+  fi
+  local c; c="$("$CUSTOM" current 2>/dev/null || true)"
+  if [ -n "$c" ]; then printf '%s' "$c"; return; fi
+  basename "$(readlink "$CURRENT_LINK" 2>/dev/null || true)"
+}
+
+# advance a list read on stdin, after a NAME ($1); wraps; empty current -> first
+next_string() {
+  local current="$1" first="" seen=0 val
+  while IFS= read -r val; do
+    [ -n "$val" ] || continue
+    [ -z "$first" ] && first="$val"
+    [ "$seen" -eq 1 ] && { printf '%s' "$val"; return; }
+    [ "$val" = "$current" ] && seen=1
+  done
+  printf '%s' "$first"
+}
+
+# advance a list read on stdin, after a FILE ($1); wraps; empty current -> first
+next_file() {
+  local current="$1" first="" seen=0 val
+  while IFS= read -r val; do
+    [ -n "$val" ] || continue
+    [ -z "$first" ] && first="$val"
+    [ "$seen" -eq 1 ] && { printf '%s' "$val"; return; }
+    if [ -n "$current" ] && [ -e "$current" ] && [ "$val" -ef "$current" ]; then seen=1; fi
+  done
+  printf '%s' "$first"
+}
+
+ensure_overlay() {
+  pgrep -f "omacosy-overlay" >/dev/null 2>&1 && return 0
+  [ -x "$OVERLAY_BIN" ] || return 0
+  # Prefer the launchd agent (it survives a logout and is restarted after a
+  # crash); fall back to a bare process when the agent is not installed.
+  launchctl kickstart "gui/$(id -u)/com.omacosy.overlay" 2>/dev/null && return 0
+  nohup "$OVERLAY_BIN" >/dev/null 2>&1 &
+}
+
+show_overlay_then_relink() {
+  local wall="$1" theme_dir="$2" logical="$3" i ack="$STATE_DIR/overlay-ack"
+  [ -p "$ack" ] || { rm -f "$ack"; mkfifo "$ack" 2>/dev/null || true; }
+  # read-write open never blocks, and gives the helper a reader to signal.
+  exec 8<>"$ack" 2>/dev/null || true
+  # drain stale bytes from an earlier press
+  while read -t 0 -u 8 -n 1 -s 2>/dev/null; do :; done
+  printf '%s\n' "$wall" > "$OVERLAY_FILE.tmp" && mv -f "$OVERLAY_FILE.tmp" "$OVERLAY_FILE"
+  ensure_overlay
+  # Block on the helper's event: it writes one byte once the wallpaper is on
+  # screen. No sleeping loop; the content check guards a stray byte, and the
+  # timeout keeps a dead helper from wedging the switch.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    read -t 1 -u 8 -n 1 -s 2>/dev/null || break
+    [ "$(<"$SHOWN_FILE")" = "$wall" ] && break
+  done
+  exec 8>&- 2>/dev/null || true
+  ln -sfn "$theme_dir" "$CURRENT_LINK"
+  printf '%s\n' "$logical" > "$PENDING_THEME"
+  printf '%s\n' "$wall" > "$PENDING_WALL"
+  ln -nsf "$wall" "$BACKGROUND_LINK"
+  if [ "$logical" = custom ]; then printf '%s\n' "$wall" > "$CUSTOM_INDEX"
+  else printf '%s\n' "$logical" > "$LAST_STOCK"; fi
+  # The terminal and its apps follow the SAME moment as the bar: they only
+  # need the theme directory, which is already relinked. The previous apply
+  # is stopped so a burst does not stack dozens of them.
+  kill "$(cat "$APPLY_PID" 2>/dev/null || true)" 2>/dev/null || true
+  ( "$AUTO_THEME" apply "$logical" >/dev/null 2>&1 || true ) &
+  echo $! > "$APPLY_PID"
+  schedule_settle "$logical" "$wall"
+}
+
+schedule_settle() {
+  local logical="$1" wall="$2" gen
+  gen="$logical|$wall"
+  kill "$(cat "$SETTLER_PID" 2>/dev/null || true)" 2>/dev/null || true
+  (
+    sleep "$SETTLE_SECONDS"
+    [ "$(cat "$PENDING_THEME" 2>/dev/null || true)|$(cat "$PENDING_WALL" 2>/dev/null || true)" = "$gen" ] || exit 0
+    "$HELPER" wallpaper "$wall" >/dev/null 2>&1 || true
+    # Hand the chosen wallpaper to the overlay helper. It watches the macOS
+    # wallpaper store and hides the overlay when that picture is actually
+    # applied — an event, so there is no poll and no grace here.
+    printf '%s\n' "$wall" > "$TARGET_FILE.tmp" && mv -f "$TARGET_FILE.tmp" "$TARGET_FILE"
+    printf '%s settled %s\n' "$(date '+%H:%M:%S')" "$logical" >> "$LOG"
+  ) &
+  echo $! > "$SETTLER_PID"
+  log "pending $logical $(basename "$wall") (settle ${SETTLE_SECONDS}s)"
+}
+
+mode="${1:-theme}"
+shift || true
+
+case "$mode" in
+  theme|wallpaper)
+    list=()
+    while IFS= read -r t; do list+=("$t"); done < <(stock_themes)
+    have_custom && list+=(custom)
+    cur="$(current_logical)"
+
+    if [ "$mode" = theme ]; then
+      logical="$(printf '%s\n' "${list[@]}" | next_string "$cur")"
+      [ -n "$logical" ] || logical="${list[0]}"
+    else
+      logical="$cur"
+      [ -n "$logical" ] || logical="${list[0]}"
+    fi
+
+    curwall="$(readlink -f "$BACKGROUND_LINK" 2>/dev/null || true)"
+    if [ "$logical" = custom ]; then
+      dir="$("$CUSTOM" dir)"
+      if [ "$mode" = wallpaper ]; then
+        wall="$("$CUSTOM" list | next_file "$curwall")"
+      else
+        wall="$(cat "$PENDING_WALL" 2>/dev/null || true)"
+        case "$wall" in "$dir"/*) : ;; *) wall="$(cat "$CUSTOM_INDEX" 2>/dev/null || true)" ;; esac
+      fi
+      [ -n "$wall" ] && [ -f "$wall" ] || wall="$("$CUSTOM" list | head -1)"
+      theme_dir="$("$CUSTOM" theme "$wall")" || exit 1
+    else
+      theme_dir="$THEMES_DIR/$logical"
+      if [ "$mode" = wallpaper ]; then
+        wall="$(bgs_of "$theme_dir/backgrounds" | next_file "$curwall")"
+      else
+        wall="$(bgs_of "$theme_dir/backgrounds" | head -1)"
+      fi
+      [ -n "$wall" ] || { log "no wallpaper for $logical"; exit 1; }
+    fi
+
+    log "switch $mode -> $logical / $(basename "$wall")"
+    show_overlay_then_relink "$wall" "$theme_dir" "$logical"
+    ;;
+
+  set)
+    logical="${1:?usage: omacosy-theme-switch set <theme> [wallpaper]}"
+    wall="${2:-}"
+    if [ "$logical" = custom ]; then
+      dir="$("$CUSTOM" dir)"
+      [ -n "$wall" ] || wall="$(cat "$CUSTOM_INDEX" 2>/dev/null || "$CUSTOM" list | head -1)"
+      theme_dir="$("$CUSTOM" theme "$wall")" || exit 1
+    else
+      theme_dir="$THEMES_DIR/$logical"
+      [ -n "$wall" ] || wall="$(bgs_of "$theme_dir/backgrounds" | head -1)"
+    fi
+    show_overlay_then_relink "$wall" "$theme_dir" "$logical"
+    ;;
+
+  off)
+    printf 'off\n' > "$OVERLAY_FILE.tmp" && mv -f "$OVERLAY_FILE.tmp" "$OVERLAY_FILE"
+    : > "$TARGET_FILE"
+    ;;
+
+  *)
+    echo "usage: omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|off]" >&2
+    exit 2
+    ;;
+esac

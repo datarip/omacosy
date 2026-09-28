@@ -130,8 +130,8 @@ rules = slot_rules + [
       if shutil.which("yazi") or os.path.exists("/opt/homebrew/bin/yazi") else []),
     rule("music", "m", SHIFT, cmd=serialised(f"open -a '{apps['MUSIC']}'")),
     rule("messenger", "g", SHIFT, cmd=serialised(f"open -a '{apps['MESSENGER']}'")),
-    rule("next theme", "t", SHIFT, cmd=f"{home}/.local/bin/theme-next"),
-    rule("next wallpaper", "b", SHIFT, cmd=f"{home}/.local/bin/theme-bg-next"),
+    rule("next theme", "t", SHIFT, cmd=f"{home}/.local/bin/omacosy-theme-switch theme"),
+    rule("next wallpaper", "b", SHIFT, cmd=f"{home}/.local/bin/omacosy-theme-switch wallpaper"),
     rule("lock", "l", SHIFT, cmd=f"{home}/.local/bin/omacosy-helper lock"),
     rule("cheatsheet", "k", SUPER, cmd="/usr/bin/touch /tmp/omacosy-bar-cheatsheet"),
     # OmniWM has no close-window command (HotkeyCommand.swift) — send

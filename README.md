@@ -89,6 +89,8 @@ The fixes this build offers upstream, and their state today.
 <!-- upstream-prs:start -->
 | PR | State | Title |
 | --- | --- | --- |
+| [#76](https://github.com/paulsp94/omacosy/pull/76) | OPEN | fix(ws-collapse): the restore never drops a live window's record |
+| [#75](https://github.com/paulsp94/omacosy/pull/75) | OPEN | fix(ws-collapse): the fold map survives an OmniWM restart |
 | [#73](https://github.com/paulsp94/omacosy/pull/73) | OPEN | fix(spawn): a Super+F window leaves fullscreen before a new window opens beside it |
 | [#71](https://github.com/paulsp94/omacosy/pull/71) | OPEN | fix(ghostty): close a window without a prompt, as on Omarchy |
 | [#70](https://github.com/paulsp94/omacosy/pull/70) | OPEN | fix(spawn): a burst waits for each window to settle before the next one |
@@ -99,7 +101,7 @@ The fixes this build offers upstream, and their state today.
 | [#65](https://github.com/paulsp94/omacosy/pull/65) | MERGED | docs(readme): one command to install or reinstall |
 | [#64](https://github.com/paulsp94/omacosy/pull/64) | OPEN | feat(install): test the signing certificate and clear stale permissions |
 | [#63](https://github.com/paulsp94/omacosy/pull/63) | MERGED | fix(ffm): stand down while OmniWM runs |
-| [#62](https://github.com/paulsp94/omacosy/pull/62) | OPEN | fix(ws-collapse): restore keeps the map until the windows are back |
+| [#62](https://github.com/paulsp94/omacosy/pull/62) | CLOSED | fix(ws-collapse): restore keeps the map until the windows are back |
 | [#61](https://github.com/paulsp94/omacosy/pull/61) | MERGED | fix(toggle): on brings back the setup of this Mac's window manager |
 | [#60](https://github.com/paulsp94/omacosy/pull/60) | MERGED | fix(bar): one routine follows the window manager, and the bar stays when none answers |
 | [#59](https://github.com/paulsp94/omacosy/pull/59) | MERGED | feat(install): choose the window manager with --aerospace or --omniwm |

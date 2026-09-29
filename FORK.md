@@ -67,7 +67,8 @@ requests are where they can become everyone's. See
   permission prompt) cannot be kept above a tiled window.** On OmniWM, mouse
   focus raises the hovered tile over the float, and no setting changes that;
   an external helper cannot reorder another app's window either (macOS needs
-  Dock injection with SIP off). This needs a change in OmniWM. Under AeroSpace
+  Dock injection with SIP off). This needs a change in OmniWM — reported as
+  [OmniNull/OmniWM#768](https://github.com/OmniNull/OmniWM/issues/768). Under AeroSpace
   the same wall is by design — see [docs/why-aerospace.md](docs/why-aerospace.md)
   — and `omacosy-float` (`Super+S`) surfaces a buried float. The focus ring no
   longer paints over a window that covers the focused one.

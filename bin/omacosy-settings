@@ -155,6 +155,27 @@ if [ -f "$AERO" ] && grep -q '^cmd-ctrl-alt-shift-enter = ' "$AERO" \
   say "browser chord now follows the macOS default browser"
 fi
 
+# The email chord is NEW, not a rename: a seeded aerospace.toml has no
+# `cmd-ctrl-alt-shift-e` line at all, so it is inserted once, after the
+# neighbouring app chord (messenger, else music, else files). OmniWM gets
+# the rule from the regenerated Karabiner set, so this is the AeroSpace half
+# of the same parity. A file with no anchor to insert against is left alone.
+if [ -f "$AERO" ] && ! grep -q '^cmd-ctrl-alt-shift-e = ' "$AERO"; then
+  EMAIL_ANCHOR=""
+  for k in g m f; do
+    if grep -q "^cmd-ctrl-alt-shift-$k = " "$AERO"; then EMAIL_ANCHOR=$k; break; fi
+  done
+  if [ -n "$EMAIL_ANCHOR" ]; then
+    EMAIL_LINE="cmd-ctrl-alt-shift-e = 'exec-and-forget \$HOME/.local/bin/omacosy-open mailto'"
+    awk -v line="$EMAIL_LINE" -v pat="^cmd-ctrl-alt-shift-$EMAIL_ANCHOR = " '
+      { print }
+      $0 ~ pat && !done { print line; done = 1 }
+    ' "$AERO" > "$AERO.new" && mv -f "$AERO.new" "$AERO" || rm -f "$AERO.new"
+    CHANGED=1
+    say "added the email chord (Super+Shift+E, the macOS default mail app)"
+  fi
+fi
+
 # ── 2. window corners and the focus ring ──────────────────────────
 # install.sh re-copies borders.conf, so the ring radius goes back to the
 # default. The window corner radius is a global preference that no

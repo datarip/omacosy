@@ -89,6 +89,7 @@ The fixes this build offers upstream, and their state today.
 <!-- upstream-prs:start -->
 | PR | State | Title |
 | --- | --- | --- |
+| [#77](https://github.com/paulsp94/omacosy/pull/77) | OPEN | feat(chords): the browser and mail chords follow the macOS defaults |
 | [#76](https://github.com/paulsp94/omacosy/pull/76) | OPEN | fix(ws-collapse): the restore never drops a live window's record |
 | [#75](https://github.com/paulsp94/omacosy/pull/75) | OPEN | fix(ws-collapse): the fold map survives an OmniWM restart |
 | [#73](https://github.com/paulsp94/omacosy/pull/73) | OPEN | fix(spawn): a Super+F window leaves fullscreen before a new window opens beside it |

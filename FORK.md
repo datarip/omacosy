@@ -59,6 +59,18 @@ requests are where they can become everyone's. See
 | `~/.zshrc` is a real stub file, not a link into the clone. An existing `~/.zshrc` is copied to `~/.zshrc.local` first, and `uninstall.sh` puts it back | `install.sh`, `uninstall.sh` |
 | OmniWM's `settings.toml` is generated from `settings.template.toml`, so OmniWM's rewrites of it never make the clone dirty | `install.sh`, `config/omniwm/` |
 | Both window-manager configs are **seeded once and never overwritten**. Your keybindings, and everything OmniWM writes through its own interface, survive every install. When the shipped default moves you are told, and given the path to diff against | `install.sh` (`seed_config`) |
+| The focus ring hides when a layer-0 window in front of the focused window reaches its stroke, instead of painting over it. Awaits #51, then a pull request | `helper/borders.swift` |
+
+## Known limitations
+
+- **A floating window (System Settings, a settings / About panel, a
+  permission prompt) cannot be kept above a tiled window.** On OmniWM, mouse
+  focus raises the hovered tile over the float, and no setting changes that;
+  an external helper cannot reorder another app's window either (macOS needs
+  Dock injection with SIP off). This needs a change in OmniWM. Under AeroSpace
+  the same wall is by design — see [docs/why-aerospace.md](docs/why-aerospace.md)
+  — and `omacosy-float` (`Super+S`) surfaces a buried float. The focus ring no
+  longer paints over a window that covers the focused one.
 
 ## Your settings
 

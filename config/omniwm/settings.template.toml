@@ -49,7 +49,7 @@ followsWindowToMonitor = true
 lockModifier = "off"
 moveCrossesMonitorAtEdge = true
 moveMouseToFocusedWindow = false
-raiseOnMouseFocus = true
+raiseOnMouseFocus = false
 
 [gaps]
 fullscreenUsesOuterGaps = true

@@ -27,7 +27,7 @@ MARK="omacosy-omniwm"                     # rule-description prefix, removal key
 
 [ -f "$KARABINER" ] || { echo "no karabiner.json" >&2; exit 1; }
 
-TERMINAL=Ghostty BROWSER=Safari MUSIC=Spotify MESSENGER=Slack
+TERMINAL=Ghostty BROWSER= MUSIC=Spotify MESSENGER=Slack
 [ -f "$APPS" ] && . "$APPS" 2>/dev/null
 
 export KARABINER MARK TERMINAL BROWSER MUSIC MESSENGER
@@ -73,8 +73,9 @@ apps = {k: os.environ[k] for k in ("TERMINAL", "BROWSER", "MUSIC", "MESSENGER")}
 # window appears. A bare `open -a` skips both, so a burst of presses
 # lands unshaped. These chords are matched to that.
 #
-# The browser chord is deliberately NOT wrapped: aerospace opens it
-# bare too, so the two already agree.
+# The browser chord runs omacosy-browser, which follows the macOS default
+# browser unless BROWSER names one — the same command aerospace runs, so
+# the two managers agree.
 #
 # Guarded like the files chord, so a build without omacosy-spawn-cmd
 # keeps the bare command.
@@ -99,7 +100,7 @@ rules = slot_rules + [
     # omacosy-spawn preselects the omarchy insertion side and serializes
     # bursts — a bare `open -na` gives OmniWM's above-not-below spiral
     rule("terminal", "return_or_enter", SUPER, cmd=f"{home}/.local/bin/omacosy-spawn '{apps['TERMINAL']}'"),
-    rule("browser", "return_or_enter", SHIFT, cmd=f"open -a '{apps['BROWSER']}'"),
+    rule("browser", "return_or_enter", SHIFT, cmd=f"{home}/.local/bin/omacosy-browser"),
     # trial: OmniWM's command palette on the launcher chord (Raycast
     # parked — swap the two lines to go back)
     rule("launcher", "spacebar", SUPER, cmd="/opt/homebrew/bin/omniwmctl command open-command-palette >/dev/null 2>&1"),
@@ -130,6 +131,8 @@ rules = slot_rules + [
       if shutil.which("yazi") or os.path.exists("/opt/homebrew/bin/yazi") else []),
     rule("music", "m", SHIFT, cmd=serialised(f"open -a '{apps['MUSIC']}'")),
     rule("messenger", "g", SHIFT, cmd=serialised(f"open -a '{apps['MESSENGER']}'")),
+    # the default mail app, or EMAIL when set — the same command aerospace runs
+    rule("email", "e", SHIFT, cmd=f"{home}/.local/bin/omacosy-open mailto"),
     rule("next theme", "t", SHIFT, cmd=f"{home}/.local/bin/omacosy-theme-switch theme"),
     rule("next wallpaper", "b", SHIFT, cmd=f"{home}/.local/bin/omacosy-theme-switch wallpaper"),
     rule("lock", "l", SHIFT, cmd=f"{home}/.local/bin/omacosy-helper lock"),

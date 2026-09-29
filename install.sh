@@ -305,11 +305,18 @@ read_apps() {
     case "$k" in
       TERMINAL) TERMINAL="$v" ;;
       BROWSER) BROWSER="$v" ;;
+      EMAIL) EMAIL="$v" ;;
       MUSIC) MUSIC="$v" ;;
       MESSENGER) MESSENGER="$v" ;;
     esac
   done < "$f"
 }
+# The apps the launch chords open. config/apps.conf holds the shipped
+# defaults and apps.local.conf overrides them; BROWSER and EMAIL are
+# deliberately left unset there, so those chords follow the macOS default
+# web browser and mail app (see bin/omacosy-browser, bin/omacosy-open)
+# until you name one.
+TERMINAL= BROWSER= EMAIL= MUSIC= MESSENGER=
 read_apps "$REPO_DIR/config/apps.conf"
 read_apps "$REPO_DIR/config/apps.local.conf"
 # Top gap for the built-in display. The bar is BAR_HEIGHT tall and sits
@@ -378,7 +385,7 @@ seed_config() {            # DEST NAME — generated content on stdin
 # Super+Shift+Y is bound only where yazi is installed: an optional tool gets
 # no chord that can only fail. Installing it later takes a re-run.
 if command -v yazi >/dev/null 2>&1 || [ -x /opt/homebrew/bin/yazi ]; then YAZI_LINE='s|^#yazi# ||'; else YAZI_LINE='/^#yazi# /d'; fi
-sed -e "s|@TERMINAL@|$TERMINAL|g" -e "s|@BROWSER@|$BROWSER|g" \
+sed -e "s|@TERMINAL@|$TERMINAL|g" \
     -e "s|@MUSIC@|$MUSIC|g" -e "s|@MESSENGER@|$MESSENGER|g" -e "$YAZI_LINE" \
     -e "s|@OUTER_TOP@|$OUTER_TOP|g" -e "s|@OUTER_TOP_EXT@|$OUTER_TOP_EXT|g" \
   "$REPO_DIR/config/aerospace/aerospace.template.toml" \
@@ -693,8 +700,8 @@ fi
 # app choices, RESOLVED (apps.local.conf already applied), for the same
 # reason: the bar's activity pill launches $TERMINAL and cannot read the
 # repo from a launchd agent when the clone is TCC-protected
-printf 'TERMINAL="%s"\nBROWSER="%s"\nMUSIC="%s"\nMESSENGER="%s"\n' \
-  "$TERMINAL" "$BROWSER" "$MUSIC" "$MESSENGER" > "$HOME/.config/omacosy/apps.conf"
+printf 'TERMINAL="%s"\nBROWSER="%s"\nEMAIL="%s"\nMUSIC="%s"\nMESSENGER="%s"\n' \
+  "$TERMINAL" "$BROWSER" "$EMAIL" "$MUSIC" "$MESSENGER" > "$HOME/.config/omacosy/apps.conf"
 
 cat > "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -860,6 +867,8 @@ link "$REPO_DIR/bin/omacosy-settings" "$HOME/.local/bin/omacosy-settings"
 link "$REPO_DIR/bin/omacosy-window-corners" "$HOME/.local/bin/omacosy-window-corners"
 link "$REPO_DIR/bin/omacosy-spawn-cmd" "$HOME/.local/bin/omacosy-spawn-cmd"
 link "$REPO_DIR/bin/omacosy-harvest-zshrc" "$HOME/.local/bin/omacosy-harvest-zshrc"
+link "$REPO_DIR/bin/omacosy-browser" "$HOME/.local/bin/omacosy-browser"
+link "$REPO_DIR/bin/omacosy-open" "$HOME/.local/bin/omacosy-open"
 
 # --- 3. omarchy theme convention -------------------------------------------
 # Canonical theme state lives at ~/.config/omarchy/current/theme (what the

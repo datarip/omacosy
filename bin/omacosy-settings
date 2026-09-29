@@ -57,7 +57,7 @@ if ! bash -n "$SETTINGS" 2>/dev/null; then
 fi
 
 # A key the file leaves out keeps its default. Empty means "leave it alone".
-TERMINAL="" BROWSER="" MUSIC="" MESSENGER=""
+TERMINAL="" BROWSER="" EMAIL="" MUSIC="" MESSENGER=""
 APP_WORKSPACE_RULES="" APP_FLOAT_RULES=""
 RING_RADIUS="" WINDOW_CORNER="" SERIALIZE_APP_SPAWNS="0" AUTOHIDE=""
 # shellcheck source=/dev/null
@@ -73,7 +73,7 @@ CHANGED=0
 #
 # An empty value is left out, not written blank: install.sh warns about
 # `MUSIC=`, and an absent key gives the same default without the warning.
-if [ -n "$TERMINAL$BROWSER$MUSIC$MESSENGER" ]; then
+if [ -n "$TERMINAL$BROWSER$EMAIL$MUSIC$MESSENGER" ]; then
   if [ -z "$REPO_DIR" ]; then
     warn "cannot find the clone, so config/apps.local.conf was left alone"
   else
@@ -82,7 +82,7 @@ if [ -n "$TERMINAL$BROWSER$MUSIC$MESSENGER" ]; then
     {
       echo "# Written by omacosy-settings from ~/.config/omacosy/settings.conf. Edit that file."
       echo "# install.sh reads this and generates ~/.config/omacosy/apps.conf from it."
-      for k in TERMINAL BROWSER MUSIC MESSENGER; do
+      for k in TERMINAL BROWSER EMAIL MUSIC MESSENGER; do
         v="${!k}"
         [ -z "$v" ] && continue
         if is_name "$v"; then
@@ -104,7 +104,7 @@ fi
 # the OmniWM chords, and the bar at its restart in step 3, read install.sh's resolved copy
 APPS_CONF="$HOME/.config/omacosy/apps.conf"
 if [ -f "$APPS_CONF" ]; then
-  for k in TERMINAL BROWSER MUSIC MESSENGER; do
+  for k in TERMINAL BROWSER EMAIL MUSIC MESSENGER; do
     v="${!k}"
     { [ -n "$v" ] && is_name "$v"; } || continue
     # quoted, like install.sh writes it: is_name allows spaces, and
@@ -123,8 +123,10 @@ fi
 
 # install.sh writes the app names into aerospace.toml, so apps.local.conf
 # changes the next install and not today. install.sh no longer rewrites
-# aerospace.toml either — it is seeded once and left alone — so all four
-# chords are patched here, in place, and take effect on reload.
+# aerospace.toml either — it is seeded once and left alone — so the three
+# chords that name an app are patched here, in place, and take effect on
+# reload. The browser chord names no app: it runs bin/omacosy-browser, which
+# resolves the system default (or BROWSER) at press time.
 patch_chord() {
   local key=$1 app=$2 cur
   { [ -f "$AERO" ] && [ -n "$app" ] && is_name "$app"; } || return 0
@@ -138,9 +140,20 @@ patch_chord() {
   say "$key now launches $app"
 }
 patch_chord cmd-ctrl-alt-enter       "$TERMINAL"
-patch_chord cmd-ctrl-alt-shift-enter "$BROWSER"
 patch_chord cmd-ctrl-alt-shift-m     "$MUSIC"
 patch_chord cmd-ctrl-alt-shift-g     "$MESSENGER"
+
+# The browser chord names no app, so there is nothing to patch above. An
+# aerospace.toml seeded before that change still carries `open -a "<name>"`;
+# repoint it once.
+if [ -f "$AERO" ] && grep -q '^cmd-ctrl-alt-shift-enter = ' "$AERO" \
+   && ! grep -q '^cmd-ctrl-alt-shift-enter = .*omacosy-browser' "$AERO"; then
+  sed -i '' -E \
+    "s|^(cmd-ctrl-alt-shift-enter = 'exec-and-forget ).*|\1\$HOME/.local/bin/omacosy-browser'|" \
+    "$AERO"
+  CHANGED=1
+  say "browser chord now follows the macOS default browser"
+fi
 
 # ── 2. window corners and the focus ring ──────────────────────────
 # install.sh re-copies borders.conf, so the ring radius goes back to the
@@ -443,7 +456,16 @@ chord() { grep -m1 "^$1 = " "$AERO" 2>/dev/null | sed -E 's/.*"([^"]*)".*/\1/'; 
 echo
 say "done"
 echo "  Super+Return:        $(chord cmd-ctrl-alt-enter)"
-echo "  Super+Shift+Return:  $(chord cmd-ctrl-alt-shift-enter)"
+if [ -n "$BROWSER" ]; then
+  echo "  Super+Shift+Return:  $BROWSER (pinned)"
+else
+  echo "  Super+Shift+Return:  the macOS default browser"
+fi
+if [ -n "$EMAIL" ]; then
+  echo "  Super+Shift+E:       $EMAIL (pinned)"
+else
+  echo "  Super+Shift+E:       the macOS default mail app"
+fi
 if [ -n "$REPO_DIR" ]; then
   echo "  running from:        $REPO_DIR ($(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null))"
 else

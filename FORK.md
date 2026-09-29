@@ -56,6 +56,7 @@ requests are where they can become everyone's. See
 | `omacosy-window-corners` sets the radius macOS draws window corners with, and keeps the focus ring concentric | `bin/omacosy-window-corners` |
 | `omacosy-spawn-cmd` opens one window at a time from a burst of presses on the music and messenger chords | `bin/omacosy-spawn-cmd` |
 | `omacosy-harvest-zshrc` moves installer appends out of `~/.zshrc` into `~/.zshrc.local` | `bin/omacosy-harvest-zshrc` |
+| The browser and mail chords follow the macOS default web browser and mail app, resolved from LaunchServices at each press, so a change in System Settings needs no reinstall. Set `BROWSER` or `EMAIL` to pin one app instead. `omacosy-open` opens any URL, file or scheme with its macOS default app | `bin/omacosy-browser`, `bin/omacosy-open`, `helper/main.swift` |
 | `~/.zshrc` is a real stub file, not a link into the clone. An existing `~/.zshrc` is copied to `~/.zshrc.local` first, and `uninstall.sh` puts it back | `install.sh`, `uninstall.sh` |
 | OmniWM's `settings.toml` is generated from `settings.template.toml`, so OmniWM's rewrites of it never make the clone dirty | `install.sh`, `config/omniwm/` |
 | Both window-manager configs are **seeded once and never overwritten**. Your keybindings, and everything OmniWM writes through its own interface, survive every install. When the shipped default moves you are told, and given the path to diff against | `install.sh` (`seed_config`) |

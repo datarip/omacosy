@@ -7,6 +7,10 @@
 //   safe-top                the built-in display's notch inset in points
 //                           (0 = no notch); install.sh sizes the top gap
 //                           from it
+//   default-browser         the default web browser's bundle id; the
+//                           browser chord asks this at press time
+//   default-app <scheme>    the bundle id of the app macOS opens <scheme>
+//                           with (e.g. mailto); bin/omacosy-open asks this
 //   wallpaper <path>        set the desktop picture on every screen
 //   wallpaper resync        put the recorded picture back on any screen
 //                           that shows an older omacosy picture
@@ -148,6 +152,19 @@ func deviceName(_ id: AudioDeviceID) -> String {
 
 // --- dispatch ----------------------------------------------------------
 
+// The bundle id of the app macOS opens a URL scheme with, or nil. Asked of
+// LaunchServices on every call so a change in System Settings is followed
+// at once, and so the implicit default (Safari for http on a fresh Mac) is
+// answered too, which reading ~/Library/Preferences com.apple.LaunchServices
+// does not. Shared by `default-browser` and `default-app`.
+func defaultHandler(_ scheme: String) -> String? {
+    guard let probe = URL(string: scheme + ":"),
+          let app = NSWorkspace.shared.urlForApplication(toOpen: probe),
+          let bid = Bundle(url: app)?.bundleIdentifier
+    else { return nil }
+    return bid
+}
+
 let args = CommandLine.arguments
 switch args.count > 1 ? args[1] : "" {
 case "cursor":
@@ -241,6 +258,20 @@ case "safe-top":
             .uint32Value == builtin
     }
     print(Int(panel?.safeAreaInsets.top ?? 0))
+
+case "default-browser":
+    // The bundle id of the system's default web browser. bin/omacosy-browser
+    // asks this on every press, so changing the default in System Settings
+    // takes effect at the next Super+Shift+Return with no reinstall.
+    guard let bid = defaultHandler("http") else { exit(1) }
+    print(bid)
+
+case "default-app":
+    // The bundle id of the app macOS opens <scheme> with. bin/omacosy-open
+    // asks it for mailto (and anything else), the general form of
+    // `default-browser`.
+    guard args.count > 2, let bid = defaultHandler(args[2]) else { exit(1) }
+    print(bid)
 
 case "wallpaper":
     guard args.count > 2 else {
@@ -737,5 +768,5 @@ case "bt":
     }
 
 default:
-    fail("usage: omacosy-helper cursor | displays | wallpaper <path> | audio ... | bt ... | brightness [set <0-100>] | input-age")
+    fail("usage: omacosy-helper cursor | displays | default-browser | default-app <scheme> | wallpaper <path> | audio ... | bt ... | brightness [set <0-100>] | input-age")
 }

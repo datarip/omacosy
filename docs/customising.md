@@ -96,6 +96,14 @@ The same file sets the apps the four launch chords open: `TERMINAL`,
 keeps the default from `config/apps.conf`. A changed app takes effect
 after `./install.sh && omacosy-settings`.
 
+`BROWSER` and `EMAIL` are empty by default, and those chords then open
+**the macOS default web browser** and **mail app** — `bin/omacosy-browser`
+and `bin/omacosy-open` ask for them on each press, so changing the default
+in System Settings takes effect at once, with no reinstall. Name an app
+there only to pin that chord instead of the system default. `omacosy-open`
+also opens any URL, file or scheme (`omacosy-open mailto:you@example.com`)
+with whatever app macOS would use for it.
+
 `SERIALIZE_APP_SPAWNS="1"` sends the music and messenger chords through
 `omacosy-spawn-cmd`, so a burst of presses opens one window at a time.
 

@@ -314,7 +314,7 @@ Your values live in one file outside the clone,
 
 | Setting | What it sets |
 | --- | --- |
-| `TERMINAL`, `BROWSER`, `MUSIC`, `MESSENGER` | the apps the launch chords open. The defaults are Ghostty, Safari, Spotify and Slack |
+| `TERMINAL`, `BROWSER`, `EMAIL`, `MUSIC`, `MESSENGER` | the apps the launch chords open. The defaults are Ghostty, Spotify and Slack; an empty `BROWSER` or `EMAIL` means that chord follows the macOS default web browser or mail app |
 | `APP_WORKSPACE_RULES` | the workspace an app's windows open on |
 | `APP_FLOAT_RULES` | the windows that float instead of tile, under OmniWM |
 | `RING_RADIUS`, `WINDOW_CORNER` | the focus ring radius, and the radius macOS draws window corners with |
@@ -363,6 +363,8 @@ The keys and the daemons run these. You do not need to run them:
 | `omacosy-float` | Super+S, under AeroSpace: the next floating window |
 | `omacosy-layout` | Super+J, Super+- and Super+=, under AeroSpace: split direction and resize |
 | `omacosy-spawn`, `omacosy-spawn-cmd` | the launch chords: one new window at a time |
+| `omacosy-browser` | Super+Shift+Return: opens the macOS default web browser, or `BROWSER` when set |
+| `omacosy-open` | opens a URL, a file, or a scheme (`mailto`) with its macOS default app. Super+Shift+E runs `omacosy-open mailto` for mail |
 | `omacosy-finder-window` | Super+Shift+F: a new Finder window on this workspace |
 | `omacosy-files` | Super+Shift+Y: yazi in a new terminal window |
 | `omacosy-auto-theme apply` | `theme-set`, `theme-bg-next` and `omacosy-theme-switch`, when auto-theme is on |
@@ -420,7 +422,7 @@ Why so much of it is self-built:
 - **`omacosy-helper`** covers wallpaper setting (System Events
   scripting half-broke in macOS 14+), CoreAudio output switching,
   IOBluetooth control, cursor position, per-display notch detection,
-  and the dwindle split hint.
+  the default browser and mail app bundle ids, and the dwindle split hint.
 - **`omacosy-bar`** holds the window model in memory and subscribes to
   the system's own publishers: SkyLight for window churn, IOBluetooth
   for connects, SCDynamicStore for the network, IOPS for battery,

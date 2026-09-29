@@ -91,18 +91,40 @@ line: a bundle id, or `title:` followed by part of the window title.
 OmniWM reads this list. AeroSpace takes its float rules from its own
 template.
 
-The same file sets the apps the four launch chords open: `TERMINAL`,
-`BROWSER`, `MUSIC` and `MESSENGER`. Give the app's name. An empty value
-keeps the default from `config/apps.conf`. A changed app takes effect
-after `./install.sh && omacosy-settings`.
+The same file sets the apps the launch chords open: `TERMINAL`, `BROWSER`,
+`EMAIL`, `MUSIC` and `MESSENGER`. Give the app's name, or leave it empty to
+follow the system default where one exists. A changed app takes effect after
+`./install.sh && omacosy-settings`.
 
-`BROWSER` and `EMAIL` are empty by default, and those chords then open
-**the macOS default web browser** and **mail app** — `bin/omacosy-browser`
-and `bin/omacosy-open` ask for them on each press, so changing the default
-in System Settings takes effect at once, with no reinstall. Name an app
-there only to pin that chord instead of the system default. `omacosy-open`
-also opens any URL, file or scheme (`omacosy-open mailto:you@example.com`)
-with whatever app macOS would use for it.
+### Pin an app, or follow the Mac's default
+
+`BROWSER` and `EMAIL` are empty by default, and those two chords then open
+**the Mac's default web browser** and **mail app**. `bin/omacosy-browser` and
+`bin/omacosy-open` ask LaunchServices on every press, so changing the default
+takes effect at the next press, with no reinstall. `omacosy-open` likewise
+opens any URL, file or scheme (`omacosy-open mailto:you@example.com`) with
+whatever app macOS would use for it.
+
+Name an app (`BROWSER=Firefox`, `EMAIL=Thunderbird`) to **pin** that chord
+instead — it then ignores the system default. To go back to following the
+system, set the value back to `""` and run `omacosy-settings`; nothing is
+baked at install, so no reinstall is needed.
+
+To change the Mac's default itself:
+
+- **Browser.** System Settings → Desktop & Dock → **Default web browser**
+  (macOS 13 and later). Pick the app and the chord follows it.
+- **Mail.** macOS has no System Settings pane for this, so set it in the mail
+  app you want:
+  - **Thunderbird:** Settings → General → **System Integration** → *Set as
+    Default*; turn on "Always check if Thunderbird is the default client" so
+    a later change is noticed.
+  - **Apple Mail:** Mail → Settings → General → **Default email reader**, and
+    choose the app. That list also shows third-party mail apps, so it is a
+    second route to the same setting.
+
+`TERMINAL`, `MUSIC` and `MESSENGER` have no macOS default to follow, so an
+empty value there just keeps the shipped app from `config/apps.conf`.
 
 `SERIALIZE_APP_SPAWNS="1"` sends the music and messenger chords through
 `omacosy-spawn-cmd`, so a burst of presses opens one window at a time.

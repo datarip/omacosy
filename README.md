@@ -315,7 +315,7 @@ Your values live in one file outside the clone,
 
 | Setting | What it sets |
 | --- | --- |
-| `TERMINAL`, `BROWSER`, `EMAIL`, `MUSIC`, `MESSENGER` | the apps the launch chords open. The defaults are Ghostty, Spotify and Slack; an empty `BROWSER` or `EMAIL` means that chord follows the macOS default web browser or mail app |
+| `TERMINAL`, `BROWSER`, `EMAIL`, `MUSIC`, `MESSENGER` | the apps the launch chords open. The defaults are Ghostty, Spotify and Slack; an empty `BROWSER` or `EMAIL` makes that chord follow the Mac's default web browser or mail app (how to change those is in [docs/customising.md](docs/customising.md)) |
 | `APP_WORKSPACE_RULES` | the workspace an app's windows open on |
 | `APP_FLOAT_RULES` | the windows that float instead of tile, under OmniWM |
 | `RING_RADIUS`, `WINDOW_CORNER` | the focus ring radius, and the radius macOS draws window corners with |

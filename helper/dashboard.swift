@@ -500,7 +500,7 @@ final class OptionsTabView: NSView {
 
         rows = [
             OptionRow(category: "Window Manager", title: "Window Manager",
-                      desc: "Which tiling manager omacosy switches to. Switching reloads omacosy for a moment.",
+                      desc: "Which tiling manager Omacosy switches to. Switching reloads Omacosy for a moment.",
                       seg: wmSeg),
             OptionRow(category: "Windows", title: "Window Corners",
                       desc: "Radius macOS draws window corners with; the ring follows.", seg: cornerSeg),
@@ -575,13 +575,13 @@ final class OptionsTabView: NSView {
         }
 
         guard !steps.isEmpty else {
-            status = "no changes"
+            status = "No changes"
             needsDisplay = true
             return
         }
 
         saveButton.busy = true
-        status = "applying…"
+        status = "Applying…"
         needsDisplay = true
 
         DispatchQueue.global().async { [weak self] in
@@ -591,7 +591,7 @@ final class OptionsTabView: NSView {
                 last = out.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init) ?? ""
                 if code != 0 {
                     DispatchQueue.main.async {
-                        self?.status = "error: \(step.split(separator: " ").last ?? "") — \(last)"
+                        self?.status = "Error: \(step.split(separator: " ").last ?? "") — \(last)"
                         self?.saveButton.busy = false
                         self?.needsDisplay = true
                     }
@@ -600,7 +600,7 @@ final class OptionsTabView: NSView {
             }
             DispatchQueue.main.async {
                 self?.original = readState()
-                self?.status = "saved"
+                self?.status = "Saved"
                 self?.saveButton.busy = false
                 self?.needsDisplay = true
             }
@@ -1176,7 +1176,7 @@ final class WorkspaceRowView: NSView {
                         x: frame.maxX - 14, midTop: bounds.height / 2, height: bounds.height)
         }
         if assigned.isEmpty {
-            drawMidLeft("no app assigned", nerdFont("Regular", 11), palette.muted,
+            drawMidLeft("No app assigned", nerdFont("Regular", 11), palette.muted,
                         x: labelW + 8, midTop: bounds.height / 2, height: bounds.height)
         } else if !overflowApps.isEmpty {
             // accent, and clickable: reveals the hidden apps in a sideways
@@ -1459,7 +1459,7 @@ final class WorkspacesTabView: NSView {
 
     private func save() {
         saveButton.busy = true
-        status = "applying…"
+        status = "Applying…"
         needsDisplay = true
         let rules = self.rules
         // bundles taken out since the last save: omacosy-settings only adds
@@ -1479,7 +1479,7 @@ final class WorkspacesTabView: NSView {
             } else { err = "could not write settings.conf" }
             DispatchQueue.main.async {
                 self?.savedRules = rules
-                self?.status = err.isEmpty ? "saved" : "error: \(err)"
+                self?.status = err.isEmpty ? "Saved" : "Error: \(err)"
                 self?.saveButton.busy = false
                 self?.needsDisplay = true
             }
@@ -1875,7 +1875,7 @@ final class ThemesTabView: NSView {
         scroller.scrollView = scroll
         grid.onChoose = { [weak self] in self?.chooseDirectory() }
         grid.onApplied = { [weak self] title in
-            self?.status = "applied \(title)"
+            self?.status = "Applied \(title)"
             self?.needsDisplay = true
             self?.onApplied?()
         }
@@ -1969,10 +1969,11 @@ final class ThemesTabView: NSView {
 final class UpdateTabView: NSView {
     private var stateText = "Checking for updates…"
     private var detail = ""
-    private var warning = "Installing an update reloads omacosy for a short moment."
+    private var warning = "Installing an update reloads Omacosy for a short moment."
+    private let lineH: CGFloat = 24
     private var hasUpdate = false
     private var busy = false
-    private var checkedOnce = false
+    private var upToDate = false
     private let installButton = ButtonView()
 
     override init(frame frameRect: NSRect) {
@@ -1990,34 +1991,46 @@ final class UpdateTabView: NSView {
         if window != nil, !busy { check() }
     }
 
-    private func lastLine(_ s: String) -> String {
-        s.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            .last(where: { !$0.isEmpty }) ?? ""
+    // the update script prints ANSI-coloured "==> ..." messages and an
+    // indented list of commits. Keep the one line a reader can use: strip the
+    // colour, strip a leading "==> ", drop the chatter, and take what is left
+    // (the newest commit subject on an update, the reason on a failure).
+    private func infoLine(_ s: String) -> String {
+        let noANSI = s.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]",
+                                            with: "", options: .regularExpression)
+        return noANSI.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { $0.hasPrefix("==>") ? String($0.dropFirst(3)).trimmingCharacters(in: .whitespaces) : $0 }
+            .filter { !$0.isEmpty }
+            .filter { !$0.hasPrefix("checking for updates") && !$0.hasPrefix("already up to date")
+                      && !$0.hasPrefix("run without --check") && !$0.hasPrefix("pulling") }
+            .last ?? ""
     }
 
     private func check() {
         stateText = "Checking for updates…"
         detail = ""
         hasUpdate = false
+        upToDate = false
         installButton.isHidden = true
         needsDisplay = true
         DispatchQueue.global().async { [weak self] in
             let (code, out) = shell("\(HOME)/.local/bin/omacosy-update --check 2>&1")
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.checkedOnce = true
                 if code != 0 {
                     self.stateText = "Could not check for updates"
-                    self.detail = self.lastLine(out)
+                    self.detail = self.infoLine(out)
                     self.hasUpdate = false
                 } else if out.contains("new commit") {
                     self.stateText = "Update available"
-                    self.detail = self.lastLine(out.replacingOccurrences(of: "run without --check to apply", with: ""))
+                    self.detail = self.infoLine(out)
                     self.hasUpdate = true
                 } else {
-                    self.stateText = "omacosy is up to date"
-                    self.detail = self.lastLine(out)
-                    self.hasUpdate = false
+                    self.stateText = "Omacosy is up to date"
+                    self.detail = self.infoLine(out)
+                    self.upToDate = true
                 }
                 self.installButton.isHidden = !self.hasUpdate
                 self.needsLayout = true
@@ -2029,9 +2042,10 @@ final class UpdateTabView: NSView {
     private func install() {
         busy = true
         hasUpdate = false
+        upToDate = false
         installButton.isHidden = true
         stateText = "Updating…"
-        detail = "omacosy will reload in a moment; the window may flicker."
+        detail = "Omacosy will reload in a moment; the window may flicker."
         needsDisplay = true
         DispatchQueue.global().async { [weak self] in
             let (code, out) = shell("\(HOME)/.local/bin/omacosy-update 2>&1")
@@ -2040,12 +2054,10 @@ final class UpdateTabView: NSView {
                 self.busy = false
                 if code != 0 {
                     self.stateText = "Update failed"
-                    self.detail = self.lastLine(out)
-                    self.hasUpdate = false
+                    self.detail = self.infoLine(out)
                 } else {
                     self.stateText = "Updated"
-                    self.detail = self.lastLine(out)
-                    self.hasUpdate = false
+                    self.detail = ""
                 }
                 self.installButton.isHidden = true
                 self.needsLayout = true
@@ -2054,29 +2066,46 @@ final class UpdateTabView: NSView {
         }
     }
 
+    // the visible lines, top to bottom; the button (when shown) sits above
+    // them. Kept in one place so layout and draw agree on the block height.
+    private func stackLines() -> [(String, NSFont, NSColor)] {
+        var lines: [(String, NSFont, NSColor)] = [
+            (stateText, nerdFont("Bold", 15), palette.accent)
+        ]
+        if !detail.isEmpty {
+            lines.append((truncate(detail, nerdFont("Regular", 11), bounds.width - 40),
+                          nerdFont("Regular", 11), palette.muted))
+        }
+        if hasUpdate {
+            lines.append((warning, nerdFont("Regular", 11), palette.muted))
+        } else if upToDate {
+            lines.append(("Checked against the origin of this clone.",
+                          nerdFont("Regular", 11), palette.muted))
+        }
+        return lines
+    }
+
+    private func blockHeight() -> CGFloat {
+        CGFloat(stackLines().count) * lineH + (installButton.isHidden ? 0 : 34 + 14)
+    }
+
     override func layout() {
         super.layout()
-        let w: CGFloat = 160, h: CGFloat = 34
-        installButton.frame = NSRect(x: (bounds.width - w) / 2, y: bounds.height / 2 - 4,
-                                     width: w, height: h)
+        var top = (bounds.height - blockHeight()) / 2
+        if !installButton.isHidden {
+            installButton.frame = NSRect(x: (bounds.width - 160) / 2,
+                                         y: bounds.height - top - 34, width: 160, height: 34)
+            top += 34 + 14
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let mid = bounds.height / 2
-        drawMidCenter(stateText, nerdFont("Bold", 15), palette.accent,
-                      centerX: bounds.midX, midTop: mid + 44, height: bounds.height)
-        if !detail.isEmpty {
-            drawMidCenter(truncate(detail, nerdFont("Regular", 11), bounds.width - 40),
-                          nerdFont("Regular", 11), palette.muted,
-                          centerX: bounds.midX, midTop: mid + 22, height: bounds.height)
-        }
-        if hasUpdate || busy {
-            drawMidCenter(warning, nerdFont("Regular", 11), palette.muted,
-                          centerX: bounds.midX, midTop: mid + 66, height: bounds.height)
-        } else if checkedOnce {
-            drawMidCenter("Checked against the origin of this clone.",
-                          nerdFont("Regular", 11), palette.muted,
-                          centerX: bounds.midX, midTop: mid + 66, height: bounds.height)
+        var top = (bounds.height - blockHeight()) / 2
+        if !installButton.isHidden { top += 34 + 14 }
+        for (text, font, color) in stackLines() {
+            drawMidCenter(text, font, color, centerX: bounds.midX,
+                          midTop: top + lineH / 2, height: bounds.height)
+            top += lineH
         }
     }
 }

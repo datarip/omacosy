@@ -89,6 +89,7 @@ The fixes this build offers upstream, and their state today.
 <!-- upstream-prs:start -->
 | PR | State | Title |
 | --- | --- | --- |
+| [#78](https://github.com/paulsp94/omacosy/pull/78) | OPEN | fix(install): restore the OmniWM chords right after the Karabiner reset |
 | [#77](https://github.com/paulsp94/omacosy/pull/77) | OPEN | feat(chords): the browser and mail chords follow the macOS defaults |
 | [#76](https://github.com/paulsp94/omacosy/pull/76) | OPEN | fix(ws-collapse): the restore never drops a live window's record |
 | [#75](https://github.com/paulsp94/omacosy/pull/75) | MERGED | fix(ws-collapse): the fold map survives an OmniWM restart |

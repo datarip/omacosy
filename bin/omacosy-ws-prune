@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# omacosy-ws-prune <bundle-id>... — remove the OmniWM app->workspace rules
-# that omacosy-settings wrote for these bundle ids.
+# omacosy-ws-prune [--flush] [<bundle-id>...] — remove the OmniWM
+# app->workspace rules that omacosy-settings wrote for these bundle ids.
 #
 # OmniWM's rule API adds and corrects but never removes, so a bundle taken
 # out of APP_WORKSPACE_RULES in settings.conf would otherwise keep moving
@@ -8,22 +8,61 @@
 # dashboard calls this after a removal. Only rules WE own are touched: a
 # bundleId matcher with no other selector and an assignToWorkspace effect.
 #
-# Under AeroSpace this does nothing: omacosy-settings rewrites the rules
-# block in aerospace.toml in place, so a removal is already gone there.
+# Under AeroSpace this does nothing to OmniWM: omacosy-settings rewrites the
+# rules block in aerospace.toml in place, so a removal is already gone there.
+# But OmniWM may not be running at all when the removal happens, and its
+# socket is the only way in — so ids given while OmniWM is off are QUEUED to
+# ~/.local/state/omacosy/pending-ws-prune instead of dropped. `--flush`, or
+# any later call made while OmniWM IS running, drains the queue. That is what
+# lets a switch to OmniWM land on the ruleset you edited under AeroSpace.
 set -uo pipefail
 
-[ "$#" -gt 0 ] || exit 0
+STATE_DIR="$HOME/.local/state/omacosy"
+PENDING="$STATE_DIR/pending-ws-prune"
+
+# --flush carries no ids: it just drains the queue. Any call made while
+# OmniWM is running drains it too, so the flag is only for the switch to
+# ask explicitly.
+IDS=()
+for arg in "$@"; do
+  case "$arg" in
+    --flush) : ;;
+    -*)      : ;;
+    *)       [ -n "$arg" ] && IDS+=("$arg") ;;
+  esac
+done
 
 OMNI="$HOME/.local/bin/omacosy-omni"
-[ -x "$OMNI" ] || exit 0
-"$OMNI" active >/dev/null 2>&1 || exit 0
-
 OMNIWMCTL="$(command -v omniwmctl || echo /Applications/OmniWM.app/Contents/MacOS/omniwmctl)"
+
+omni_active() { [ -x "$OMNI" ] && "$OMNI" active >/dev/null 2>&1; }
+
+# OmniWM not answering its socket: queue this call's ids and leave. A later
+# call, or a switch that flushes, removes them.
+if ! omni_active; then
+  if [ "${#IDS[@]}" -gt 0 ]; then
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "${IDS[@]}" >> "$PENDING"
+    sort -u "$PENDING" -o "$PENDING" 2>/dev/null || true
+  fi
+  exit 0
+fi
+
 [ -x "$OMNIWMCTL" ] || exit 0
+
+# the ids to remove now: this call's, plus anything queued while OmniWM was off
+WANT=("${IDS[@]}")
+if [ -s "$PENDING" ]; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && WANT+=("$line")
+  done < "$PENDING"
+  rm -f "$PENDING"
+fi
+[ "${#WANT[@]}" -gt 0 ] || exit 0
 
 RULES="$("$OMNIWMCTL" query rules --format json 2>/dev/null)" || exit 0
 
-RULES="$RULES" OMNIWMCTL="$OMNIWMCTL" python3 - "$@" <<'PY'
+RULES="$RULES" OMNIWMCTL="$OMNIWMCTL" python3 - "${WANT[@]}" <<'PY'
 import json, os, subprocess, sys
 
 want = set(sys.argv[1:])

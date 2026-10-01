@@ -169,6 +169,16 @@ omniwm)
     if exists login item "AeroSpace" then delete login item "AeroSpace"
     if not (exists login item "OmniWM") then make new login item at end with properties {path:"/Applications/OmniWM.app", hidden:false}
   end tell' >/dev/null 2>&1 || true
+  # The rules in ~/.config/omacosy/settings.conf reach whichever manager is
+  # UP: omacosy-settings always rewrites aerospace.toml, but OmniWM's rules go
+  # in through its IPC socket, so they can only be written once it owns the
+  # screen. Apply them now, and drain any removals queued while AeroSpace was
+  # in charge, so the ruleset you edited under either manager is the one you
+  # land on here.
+  WS_PRUNE="$HOME/.local/bin/omacosy-ws-prune"
+  [ -x "$WS_PRUNE" ] && "$WS_PRUNE" --flush >/dev/null 2>&1 || true
+  SETTINGS_CMD="$HOME/.local/bin/omacosy-settings"
+  [ -x "$SETTINGS_CMD" ] && "$SETTINGS_CMD" >/dev/null || true
   log "OmniWM is your window manager."
   log "Way back any time: omacosy-wm-switch aerospace"
   ;;
@@ -193,6 +203,11 @@ aerospace)
   start_aerospace_world
   sleep 2
   restore_snapshot
+  # Same idea as the omniwm branch: apply the rules for the manager now in
+  # charge, so a change made while OmniWM was up is in aerospace.toml before
+  # you use it.
+  SETTINGS_CMD="$HOME/.local/bin/omacosy-settings"
+  [ -x "$SETTINGS_CMD" ] && "$SETTINGS_CMD" >/dev/null || true
   log "Back on AeroSpace."
   ;;
 *)

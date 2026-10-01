@@ -176,6 +176,20 @@ if [ -f "$AERO" ] && ! grep -q '^cmd-ctrl-alt-shift-e = ' "$AERO"; then
   fi
 fi
 
+# The settings dashboard chord (Super+,) is NEW: a seeded aerospace.toml
+# has no `cmd-ctrl-alt-comma` line, so it is inserted once, after the
+# cheatsheet binding. Under OmniWM the Karabiner set carries it instead.
+if [ -f "$AERO" ] && ! grep -q '^cmd-ctrl-alt-comma = ' "$AERO" \
+   && grep -q '^cmd-ctrl-alt-k = ' "$AERO"; then
+  DASH_LINE="cmd-ctrl-alt-comma = 'exec-and-forget \$HOME/.local/bin/omacosy-dashboard'"
+  awk -v line="$DASH_LINE" '
+    { print }
+    /^cmd-ctrl-alt-k = / && !done { print line; done = 1 }
+  ' "$AERO" > "$AERO.new" && mv -f "$AERO.new" "$AERO" || rm -f "$AERO.new"
+  CHANGED=1
+  say "added the settings dashboard chord (Super+,)"
+fi
+
 # ── 2. window corners and the focus ring ──────────────────────────
 # install.sh re-copies borders.conf, so the ring radius goes back to the
 # default. The window corner radius is a global preference that no

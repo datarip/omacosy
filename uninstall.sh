@@ -81,6 +81,15 @@ if [ -f "$PIDFILE" ] && [ ! -L "$PIDFILE" ]; then
   esac
 fi
 rm -f "$HOME/.local/bin/omacosy-overview" "$HOME/.local/bin/omacosy-toggle"
+
+# settings dashboard (Super+,): stop it, then remove the binary, launcher,
+# the copied logo assets, the pidfile and the trigger file
+pkill -f omacosy-dashboard-bin 2>/dev/null || true
+rm -f "$HOME/.local/bin/omacosy-dashboard-bin" "$HOME/.local/bin/omacosy-dashboard"
+rm -f "$HOME/.local/state/omacosy/dashboard.pid" /tmp/omacosy-dashboard
+rm -rf "$HOME/.local/state/omacosy/dashboard"
+rm -f "$HOME/.local/state/omacosy/assets/omacosy-logo.png" \
+      "$HOME/.local/state/omacosy/assets/omacosy-logo.svg"
 rm -f /tmp/omacosy-*.log /tmp/omacosy-*.err "/tmp/omacosy-overview-$(id -u).pid" \
   "/tmp/omacosy-overlay-active-$(id -u)" /tmp/omacosy-ws-switch \
   "/tmp/omacosy-user-intent-$(id -u)" \
@@ -245,7 +254,7 @@ fi
 # theme-set / theme-next out of ~/.local/bin — only when they are OUR
 # symlinks (a user's own script of the same name survives)
 for t in theme-set theme-next theme-bg-next omacosy-theme-switch omacosy-custom-theme omacosy-auto-theme omacosy-term-sync omacosy-derive omacosy-appearance omacosy-ws omacosy-toggle omacosy-focus-guard omacosy-ws-collapse omacosy-float omacosy-cycle omacosy-update omacosy-spawn omacosy-layout omacosy-finder-window omacosy-solo-fullscreen omacosy-fullscreen omacosy-bar-autohide omacosy-wm-switch omacosy-karabiner-omniwm \
-         omacosy-settings omacosy-window-corners omacosy-spawn-cmd omacosy-harvest-zshrc omacosy-browser omacosy-open; do
+         omacosy-settings omacosy-ws-prune omacosy-window-corners omacosy-spawn-cmd omacosy-harvest-zshrc omacosy-browser omacosy-open; do
   target="$(readlink "$HOME/.local/bin/$t" 2>/dev/null || true)"
   case "$target" in *omacosy*) rm -f "$HOME/.local/bin/$t" ;; esac
 done

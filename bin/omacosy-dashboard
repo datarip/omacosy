@@ -1,0 +1,44 @@
+#!/bin/bash
+# omacosy-dashboard — open the settings modal (Super+,).
+#
+# The window and its logic live in omacosy-dashboard-bin (helper/
+# dashboard.swift). This is the single-instance front door: the first
+# press starts the app, later presses poke the one already running so it
+# toggles closed. The app watches /tmp/omacosy-dashboard, the same
+# pattern the cheatsheet uses.
+set -u
+
+STATE="$HOME/.local/state/omacosy"
+PIDFILE="$STATE/dashboard.pid"
+TRIG="/tmp/omacosy-dashboard"
+BIN="$HOME/.local/bin/omacosy-dashboard-bin"
+
+mkdir -p "$STATE"
+
+# Match on the process, not the pidfile: a stale pid can be reused by an
+# unrelated process, and then `kill -0` says "running" forever and the
+# window never opens.
+if pgrep -f "omacosy-dashboard-bin" >/dev/null 2>&1; then
+  # A running window keeps the binary it was started with. If the binary on
+  # disk is newer than that process, restart instead of poking it, so a
+  # rebuild is never shadowed by a process left open from before it.
+  bin_m=$(stat -f %m "$BIN" 2>/dev/null || echo 0)
+  stamp_m=$(stat -f %m "$PIDFILE" 2>/dev/null || echo 0)
+  if [ "$bin_m" -gt "$stamp_m" ]; then
+    pkill -f "omacosy-dashboard-bin" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pgrep -f "omacosy-dashboard-bin" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+  else
+    touch "$TRIG"
+    exit 0
+  fi
+fi
+
+if [ ! -x "$BIN" ]; then
+  echo "omacosy-dashboard: not built yet ($BIN). Run ./install.sh" >&2
+  exit 1
+fi
+
+nohup "$BIN" >/dev/null 2>&1 &

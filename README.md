@@ -581,6 +581,7 @@ typing or app shortcuts. Caps Lock tapped alone is Escape.
 | `Super+shift+b` | next wallpaper of the current theme |
 | `Super+shift+l` | lock the screen |
 | `Super+k` | keybinding cheatsheet (this table, rendered from the config) |
+| `Super+,` | settings dashboard — options, app→workspace assignment, and a theme gallery |
 
 ![The keybinding cheatsheet — every binding, parsed from aerospace.toml](docs/screenshots/cheatsheet.jpg)
 

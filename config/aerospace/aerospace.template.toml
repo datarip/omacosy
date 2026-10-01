@@ -137,6 +137,10 @@ cmd-ctrl-alt-t = 'layout floating tiling'
 # THIS file, so the sheet cannot drift from the keys it documents.
 cmd-ctrl-alt-k = 'exec-and-forget /usr/bin/touch /tmp/omacosy-bar-cheatsheet'
 
+# Settings dashboard (Super+,) — the chord most apps use for preferences.
+# Single instance: the command toggles the one window it owns.
+cmd-ctrl-alt-comma = 'exec-and-forget $HOME/.local/bin/omacosy-dashboard'
+
 # Floats
 # Surface the next float on this workspace (S for surface). macOS
 # z-orders windows per APP, so a float sinks behind whichever app you

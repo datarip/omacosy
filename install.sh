@@ -657,6 +657,19 @@ if [ ! -x "$HOME/.local/bin/omacosy-overlay" ] || [ "$REPO_DIR/helper/overlay.sw
   log "Building omacosy-overlay"
   swiftc -O -o "$HOME/.local/bin/omacosy-overlay" "$REPO_DIR/helper/overlay.swift"
 fi
+
+# settings dashboard (Super+,). A bare accessory binary; the launcher
+# bin/omacosy-dashboard is a link like the other commands. No grant needed.
+if [ ! -x "$HOME/.local/bin/omacosy-dashboard-bin" ] || [ "$REPO_DIR/helper/dashboard.swift" -nt "$HOME/.local/bin/omacosy-dashboard-bin" ]; then
+  log "Building omacosy-dashboard"
+  swiftc -O -o "$HOME/.local/bin/omacosy-dashboard-bin" "$REPO_DIR/helper/dashboard.swift"
+fi
+# the wordmark, tinted with the theme accent at runtime. Copied into state,
+# not linked: a launch from a TCC-protected clone must still find it.
+mkdir -p "$STATE_DIR/assets"
+cp "$REPO_DIR/helper/assets/omacosy-logo.png" "$STATE_DIR/assets/" 2>/dev/null || true
+cp "$REPO_DIR/helper/assets/omacosy-logo.svg" "$STATE_DIR/assets/" 2>/dev/null || true
+mark "dashboard-assets"
 # stable code identity so TCC grants survive rebuilds (skipped when no
 # signing identity works — then re-grant after each rebuild)
 sign "$HOME/.local/bin/omacosy-helper" com.omacosy.helper
@@ -664,6 +677,7 @@ sign "$HOME/.local/bin/omacosy-borders" com.omacosy.borders
 sign "$HOME/.local/bin/omacosy-solo" com.omacosy.solo
 sign "$HOME/.local/bin/omacosy-recall" com.omacosy.recall
 sign "$HOME/.local/bin/omacosy-overview" com.omacosy.overview
+sign "$HOME/.local/bin/omacosy-dashboard-bin" com.omacosy.dashboard
 # the BUNDLES are signed; the identifier is what grants key on
 sign "$BAR_APP" com.omacosy.bar
 sign "$FFM_APP" com.omacosy.ffm
@@ -864,9 +878,11 @@ link "$REPO_DIR/bin/omacosy-solo-fullscreen" "$HOME/.local/bin/omacosy-solo-full
 link "$REPO_DIR/bin/omacosy-fullscreen" "$HOME/.local/bin/omacosy-fullscreen"
 link "$REPO_DIR/bin/omacosy-bar-autohide" "$HOME/.local/bin/omacosy-bar-autohide"
 link "$REPO_DIR/bin/omacosy-settings" "$HOME/.local/bin/omacosy-settings"
+link "$REPO_DIR/bin/omacosy-ws-prune" "$HOME/.local/bin/omacosy-ws-prune"
 link "$REPO_DIR/bin/omacosy-window-corners" "$HOME/.local/bin/omacosy-window-corners"
 link "$REPO_DIR/bin/omacosy-spawn-cmd" "$HOME/.local/bin/omacosy-spawn-cmd"
 link "$REPO_DIR/bin/omacosy-harvest-zshrc" "$HOME/.local/bin/omacosy-harvest-zshrc"
+link "$REPO_DIR/bin/omacosy-dashboard" "$HOME/.local/bin/omacosy-dashboard"
 link "$REPO_DIR/bin/omacosy-browser" "$HOME/.local/bin/omacosy-browser"
 link "$REPO_DIR/bin/omacosy-open" "$HOME/.local/bin/omacosy-open"
 

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# omacosy-ws-prune <bundle-id>... — remove the OmniWM app->workspace rules
+# that omacosy-settings wrote for these bundle ids.
+#
+# OmniWM's rule API adds and corrects but never removes, so a bundle taken
+# out of APP_WORKSPACE_RULES in settings.conf would otherwise keep moving
+# its windows to the workspace it was first assigned to. The settings
+# dashboard calls this after a removal. Only rules WE own are touched: a
+# bundleId matcher with no other selector and an assignToWorkspace effect.
+#
+# Under AeroSpace this does nothing: omacosy-settings rewrites the rules
+# block in aerospace.toml in place, so a removal is already gone there.
+set -uo pipefail
+
+[ "$#" -gt 0 ] || exit 0
+
+OMNI="$HOME/.local/bin/omacosy-omni"
+[ -x "$OMNI" ] || exit 0
+"$OMNI" active >/dev/null 2>&1 || exit 0
+
+OMNIWMCTL="$(command -v omniwmctl || echo /Applications/OmniWM.app/Contents/MacOS/omniwmctl)"
+[ -x "$OMNIWMCTL" ] || exit 0
+
+RULES="$("$OMNIWMCTL" query rules --format json 2>/dev/null)" || exit 0
+
+RULES="$RULES" OMNIWMCTL="$OMNIWMCTL" python3 - "$@" <<'PY'
+import json, os, subprocess, sys
+
+want = set(sys.argv[1:])
+try:
+    rules = json.loads(os.environ["RULES"])["result"]["payload"]["rules"]
+except Exception:
+    sys.exit(0)
+
+cli = os.environ["OMNIWMCTL"]
+other_selectors = ("appNameSubstring", "titleSubstring", "titleRegex", "axRole", "axSubrole")
+
+removed = 0
+for r in rules:
+    bid = r.get("bundleId")
+    if bid not in want:
+        continue
+    if any(r.get(k) for k in other_selectors):
+        continue
+    if not r.get("assignToWorkspace"):
+        continue
+    done = subprocess.run([cli, "rule", "remove", str(r["id"])],
+                          capture_output=True, text=True)
+    if done.returncode == 0:
+        removed += 1
+    else:
+        line = (done.stderr or done.stdout).strip().split("\n")
+        print("omacosy-ws-prune: could not remove rule for %s: %s"
+              % (bid, line[0] if line else ""))
+
+if removed:
+    print("omacosy-ws-prune: removed %d stale app rule(s)" % removed)
+PY

@@ -2357,6 +2357,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let root { root.resetTabsOnShow() }
         w.makeKeyAndOrderFront(nil)
         if let root { w.makeFirstResponder(root) }
+        // AeroSpace hands the window to the screen without making it key, so
+        // the first keystroke — Escape — has nowhere to go until a click. Ask
+        // for focus again one tick later, once the window server has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let w = self?.window, w.isVisible else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+            if let root = self?.root { w.makeFirstResponder(root) }
+        }
         if globalMonitor == nil {
             globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
                 self?.hide()

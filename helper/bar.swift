@@ -2425,6 +2425,26 @@ struct CheatEntry {
     let action: String
 }
 
+// The keycap's own glyph where the name has one, so the sheet prints
+// "Super+," and not "Super+Comma". Everything else keeps the existing
+// single-letter-uppercase / Capitalised treatment.
+func prettyKeyName(_ raw: String) -> String {
+    switch raw.lowercased() {
+    case "comma": return ","
+    case "period", "dot": return "."
+    case "slash", "forward_slash": return "/"
+    case "backslash": return "\\"
+    case "semicolon": return ";"
+    case "quote": return "'"
+    case "grave_accent_and_tilde", "grave": return "`"
+    case "open_bracket", "left_bracket": return "["
+    case "close_bracket", "right_bracket": return "]"
+    case "minus", "hyphen": return "-"
+    case "equal", "equal_sign": return "="
+    default: return raw.count == 1 ? raw.uppercased() : raw.capitalized
+    }
+}
+
 // "cmd-ctrl-alt-shift-1" -> "Super+Shift+1". Super IS cmd-ctrl-alt here
 // (Caps Lock sends it), so it is collapsed back into the one key the
 // user actually presses.
@@ -2441,7 +2461,7 @@ func prettyKey(_ raw: String) -> String {
         parts.append(mod == "cmd" ? "Cmd" : mod.capitalized)
         rest = String(rest[rest.index(after: dash)...])
     }
-    parts.append(rest.count == 1 ? rest.uppercased() : rest.capitalized)
+    parts.append(prettyKeyName(rest))
     return parts.joined(separator: "+")
 }
 
@@ -2526,7 +2546,7 @@ func prettyOmniKey(_ raw: String) -> String {
     for comp in rest.split(separator: "+") {
         var key = String(comp)
         if key.hasSuffix(" Arrow") { key = String(key.dropLast(" Arrow".count)) }
-        parts.append(key)
+        parts.append(prettyKeyName(key))
     }
     return parts.joined(separator: "+")
 }
@@ -2672,8 +2692,10 @@ func karabinerExecCheatEntries() -> [CheatEntry] {
                 let keyCode = from["key_code"] as? String else { continue }
             let mods = ((from["modifiers"] as? [String: Any])?["mandatory"] as? [String]) ?? []
             let hasShift = mods.contains("shift")
-            let key = keyCode == "return_or_enter" ? "Enter"
-                : keyCode == "spacebar" ? "Space" : keyCode.uppercased()
+            let key: String
+            if keyCode == "return_or_enter" { key = "Enter" }
+            else if keyCode == "spacebar" { key = "Space" }
+            else { key = prettyKeyName(keyCode) }
             let chord = "Super+" + (hasShift ? "Shift+" : "") + key
             entries.append(CheatEntry(group: "Apps and system (Karabiner)",
                 key: chord, action: String(desc.dropFirst("omacosy-omniwm: ".count))))

@@ -2477,7 +2477,12 @@ func prettyAction(_ raw: String) -> String {
                   "$HOME/.local/bin/", "/usr/bin/", "/bin/"] {
         s = s.replacingOccurrences(of: noise, with: "")
     }
-    return s.trimmingCharacters(in: .whitespaces)
+    s = s.trimmingCharacters(in: .whitespaces)
+    // the window is called Settings; the launcher on disk is
+    // omacosy-dashboard (omacosy-settings is the CLI that applies
+    // settings.conf), so name the thing the reader sees
+    if s == "dashboard" { s = "settings" }
+    return s
 }
 
 func cheatEntries() -> [CheatEntry] {

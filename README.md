@@ -335,7 +335,7 @@ Your own shell config belongs in `~/.zshrc.local`. `install.sh` writes
 `~/.zshrc` once, as a short stub that loads the repo's `zshrc`, and that
 file loads `~/.zshrc.local`.
 
-## Settings dashboard
+## Settings
 
 `Super`+`,` opens a cheatsheet-style modal — the same card as `Super`+`k` —
 with four tabs:
@@ -373,7 +373,7 @@ The commands you run:
 | `theme-next` | the next theme (Super+Shift+T) |
 | `theme-bg-next [path]` | the next wallpaper of the theme, or the image you name (Super+Shift+B) |
 | `omacosy-theme-switch theme\|wallpaper` | what Super+Shift+T and B run: the theme and the wallpaper change instantly and in sync (see Themes) |
-| `omacosy-dashboard` | Super+,: opens the settings dashboard, or toggles it closed if it is already open |
+| `omacosy-dashboard` | Super+,: opens Settings, or toggles it closed if it is already open |
 
 The keys and the daemons run these. You do not need to run them:
 
@@ -412,7 +412,7 @@ The keys and the daemons run these. You do not need to run them:
 | Park/restore the stack | `omacosy-toggle` | `bin/omacosy-toggle` |
 | System glue | `omacosy-helper` (self-compiled) | `helper/main.swift` |
 | Your settings | `omacosy-settings` | `config/settings.template.conf` (live copy: `~/.config/omacosy/settings.conf`) |
-| Settings dashboard | `omacosy-dashboard` (self-compiled accessory app on Super+,) | `helper/dashboard.swift`, `bin/omacosy-dashboard`, `helper/assets/omacosy-logo.*` |
+| Settings | `omacosy-dashboard` (self-compiled accessory app on Super+,) | `helper/dashboard.swift`, `bin/omacosy-dashboard`, `helper/assets/omacosy-logo.*` |
 | Prompt | starship | `config/starship.toml` |
 | Shell | zsh | `zsh/zshrc` + your `~/.zshrc.local` |
 | CLI stack | fzf, eza, zoxide, ripgrep, bat, lazygit, btop | wired in `zsh/zshrc` |
@@ -602,7 +602,7 @@ typing or app shortcuts. Caps Lock tapped alone is Escape.
 | `Super+shift+b` | next wallpaper of the current theme |
 | `Super+shift+l` | lock the screen |
 | `Super+k` | keybinding cheatsheet (this table, rendered from the config) |
-| `Super+,` | settings dashboard — options, app→workspace assignment, and a theme gallery |
+| `Super+,` | Settings — options, app→workspace assignment, and a theme gallery |
 
 ![The keybinding cheatsheet — every binding, parsed from aerospace.toml](docs/screenshots/cheatsheet.jpg)
 

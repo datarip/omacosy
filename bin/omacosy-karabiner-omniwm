@@ -137,9 +137,9 @@ rules = slot_rules + [
     rule("next wallpaper", "b", SHIFT, cmd=f"{home}/.local/bin/omacosy-theme-switch wallpaper"),
     rule("lock", "l", SHIFT, cmd=f"{home}/.local/bin/omacosy-helper lock"),
     rule("cheatsheet", "k", SUPER, cmd="/usr/bin/touch /tmp/omacosy-bar-cheatsheet"),
-    # the settings dashboard (Super+,), the shortcut most apps use for
-    # settings. Single instance: it toggles the one window it owns.
-    rule("dashboard", "comma", SUPER, cmd=f"{home}/.local/bin/omacosy-dashboard"),
+    # the settings window (Super+,), the shortcut most apps use for
+    # preferences. Single instance: it toggles the one window it owns.
+    rule("settings", "comma", SUPER, cmd=f"{home}/.local/bin/omacosy-dashboard"),
     # OmniWM has no close-window command (HotkeyCommand.swift) — send
     # the app-level Cmd+W instead, which closes the focused window
     rule("close window", "w", SUPER, to_key="w", to_mods=["command"]),

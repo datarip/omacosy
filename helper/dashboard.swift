@@ -2336,7 +2336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? "\(ProcessInfo.processInfo.processIdentifier)\n"
             .write(toFile: pid, atomically: true, encoding: .utf8)
 
-        watch("/tmp/omacosy-dashboard") { [weak self] in self?.toggle() }
+        watch("/tmp/omacosy-dashboard", create: true) { [weak self] in self?.toggle() }
         watch(HOME + "/.config/omarchy/current") { [weak self] in
             palette = loadPalette()
             self?.root?.reloadLogo()
@@ -2384,10 +2384,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-func watch(_ path: String, _ handler: @escaping () -> Void) {
+// create makes the trigger if it is missing. Without it the retry below runs
+// every 2 s for as long as the file is absent, and /tmp is emptied on reboot —
+// so a fresh session would tick every two seconds until the shortcut was
+// pressed again. The bar's own watcher creates its trigger for the same reason.
+func watch(_ path: String, create: Bool = false, _ handler: @escaping () -> Void) {
+    if create, !FileManager.default.fileExists(atPath: path) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
     let fd = open(path, O_EVTONLY)
     guard fd >= 0 else {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { watch(path, handler) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { watch(path, create: create, handler) }
         return
     }
     let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
@@ -2399,7 +2406,7 @@ func watch(_ path: String, _ handler: @escaping () -> Void) {
     }
     src.setCancelHandler {
         close(fd)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { watch(path, handler) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { watch(path, create: create, handler) }
     }
     src.resume()
 }

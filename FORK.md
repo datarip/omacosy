@@ -34,6 +34,7 @@ requests are where they can become everyone's. See
 | Gestures | the trackpad arms at once when OmniWM is the manager | `helper/gesture/` |
 | Undock | the fold map survives an OmniWM restart, so folded windows still return to their workspace | `bin/omacosy-ws-collapse` |
 | Undock | the restore never drops a live window's record when no window manager answers | `bin/omacosy-ws-collapse` |
+| Install | a failed or interrupted install no longer leaves the OmniWM command chords wiped: they are restored right after Karabiner is reset | `install.sh` |
 
 ### Features, each also a pull request upstream
 

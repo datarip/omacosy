@@ -335,6 +335,25 @@ Your own shell config belongs in `~/.zshrc.local`. `install.sh` writes
 `~/.zshrc` once, as a short stub that loads the repo's `zshrc`, and that
 file loads `~/.zshrc.local`.
 
+## Settings dashboard
+
+`Super`+`,` opens a cheatsheet-style modal — the same card as `Super`+`k` —
+with four tabs:
+
+- **Options** — the window manager (AeroSpace or OmniWM), window corners,
+  menu-bar mode, fullscreen, and auto-theme.
+- **Workspaces** — which apps open on which workspace, per display, with a
+  searchable picker. **Save** writes `~/.config/omacosy/settings.conf`, runs
+  `omacosy-settings`, and drops any app rule you removed (under OmniWM that
+  also prunes the manager's own rule).
+- **Themes** — every theme as a card with its colours; click one to apply it.
+- **Update** — `omacosy-update --check`, with the install button behind it.
+
+It reads and writes the same files and commands as the CLI, so the window and
+the shell can never disagree, and it follows the theme palette — its wordmark
+included. `bin/omacosy-dashboard` is a single-instance launcher: the first
+press opens it, later presses toggle the one window it owns.
+
 ## Commands
 
 The commands you run:
@@ -354,6 +373,7 @@ The commands you run:
 | `theme-next` | the next theme (Super+Shift+T) |
 | `theme-bg-next [path]` | the next wallpaper of the theme, or the image you name (Super+Shift+B) |
 | `omacosy-theme-switch theme\|wallpaper` | what Super+Shift+T and B run: the theme and the wallpaper change instantly and in sync (see Themes) |
+| `omacosy-dashboard` | Super+,: opens the settings dashboard, or toggles it closed if it is already open |
 
 The keys and the daemons run these. You do not need to run them:
 
@@ -392,6 +412,7 @@ The keys and the daemons run these. You do not need to run them:
 | Park/restore the stack | `omacosy-toggle` | `bin/omacosy-toggle` |
 | System glue | `omacosy-helper` (self-compiled) | `helper/main.swift` |
 | Your settings | `omacosy-settings` | `config/settings.template.conf` (live copy: `~/.config/omacosy/settings.conf`) |
+| Settings dashboard | `omacosy-dashboard` (self-compiled accessory app on Super+,) | `helper/dashboard.swift`, `bin/omacosy-dashboard`, `helper/assets/omacosy-logo.*` |
 | Prompt | starship | `config/starship.toml` |
 | Shell | zsh | `zsh/zshrc` + your `~/.zshrc.local` |
 | CLI stack | fzf, eza, zoxide, ripgrep, bat, lazygit, btop | wired in `zsh/zshrc` |

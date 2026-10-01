@@ -91,10 +91,10 @@ The fixes this build offers upstream, and their state today.
 | --- | --- | --- |
 | [#77](https://github.com/paulsp94/omacosy/pull/77) | OPEN | feat(chords): the browser and mail chords follow the macOS defaults |
 | [#76](https://github.com/paulsp94/omacosy/pull/76) | OPEN | fix(ws-collapse): the restore never drops a live window's record |
-| [#75](https://github.com/paulsp94/omacosy/pull/75) | OPEN | fix(ws-collapse): the fold map survives an OmniWM restart |
+| [#75](https://github.com/paulsp94/omacosy/pull/75) | MERGED | fix(ws-collapse): the fold map survives an OmniWM restart |
 | [#73](https://github.com/paulsp94/omacosy/pull/73) | OPEN | fix(spawn): a Super+F window leaves fullscreen before a new window opens beside it |
 | [#71](https://github.com/paulsp94/omacosy/pull/71) | OPEN | fix(ghostty): close a window without a prompt, as on Omarchy |
-| [#70](https://github.com/paulsp94/omacosy/pull/70) | OPEN | fix(spawn): a burst waits for each window to settle before the next one |
+| [#70](https://github.com/paulsp94/omacosy/pull/70) | MERGED | fix(spawn): a burst waits for each window to settle before the next one |
 | [#69](https://github.com/paulsp94/omacosy/pull/69) | MERGED | docs(readme): name the Screen Recording entries macOS checks |
 | [#68](https://github.com/paulsp94/omacosy/pull/68) | OPEN | fix(uninstall): remove the apps omacosy installed, and show what fails |
 | [#67](https://github.com/paulsp94/omacosy/pull/67) | MERGED | fix(uninstall): keep a backup of your settings, and say to open a new terminal |

@@ -13,18 +13,56 @@ PIDFILE="$STATE/dashboard.pid"
 TRIG="/tmp/omacosy-dashboard"
 BIN="$HOME/.local/bin/omacosy-dashboard-bin"
 
+# The checkout this script was installed from. ~/.local/bin/omacosy-dashboard
+# is a symlink into it, so resolving the link finds the live repo and the
+# assets the running app draws from. helper/dashboard.swift's repoDir()
+# checks OMACOSY_REPO first, then the theme-set symlink; mirror it.
+SELF="${BASH_SOURCE[0]}"
+case "$SELF" in */*) ;; *) SELF="$(command -v "$SELF")" ;; esac
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in
+    /*) SELF="$target" ;;
+    *)  SELF="$(dirname "$SELF")/$target" ;;
+  esac
+done
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+# Newest mtime among the files the dashboard reads, so an asset change is
+# not shadowed by a process left open from before it. logoFiles() in
+# helper/dashboard.swift loads helper/assets first, then the state and
+# share copies.
+asset_m() {
+  local newest=0 d m repo_assets
+  if [ -n "${OMACOSY_REPO:-}" ] && [ -d "$OMACOSY_REPO/helper/assets" ]; then
+    repo_assets="$OMACOSY_REPO/helper/assets"
+  else
+    repo_assets="$REPO/helper/assets"
+  fi
+  for d in "$repo_assets" \
+           "$HOME/.local/state/omacosy/assets" \
+           "$HOME/.local/share/omacosy/assets"; do
+    [ -d "$d" ] || continue
+    m=$(find "$d" -maxdepth 1 -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1)
+    [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m"
+  done
+  echo "$newest"
+}
+
 mkdir -p "$STATE"
 
 # Match on the process, not the pidfile: a stale pid can be reused by an
 # unrelated process, and then `kill -0` says "running" forever and the
 # window never opens.
 if pgrep -f "omacosy-dashboard-bin" >/dev/null 2>&1; then
-  # A running window keeps the binary it was started with. If the binary on
-  # disk is newer than that process, restart instead of poking it, so a
-  # rebuild is never shadowed by a process left open from before it.
+  # A running window keeps the binary and the assets it was started with.
+  # If either is newer than that process, restart instead of poking it, so
+  # a rebuild or an asset change is never shadowed by a process left open
+  # from before it.
   bin_m=$(stat -f %m "$BIN" 2>/dev/null || echo 0)
   stamp_m=$(stat -f %m "$PIDFILE" 2>/dev/null || echo 0)
-  if [ "$bin_m" -gt "$stamp_m" ]; then
+  assets_m=$(asset_m)
+  if [ "$bin_m" -gt "$stamp_m" ] || [ "$assets_m" -gt "$stamp_m" ]; then
     pkill -f "omacosy-dashboard-bin" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       pgrep -f "omacosy-dashboard-bin" >/dev/null 2>&1 || break

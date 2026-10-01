@@ -312,6 +312,9 @@ final class SegmentedView: NSView {
 final class ButtonView: NSView {
     var title = "Save"
     var fontSize: CGFloat = 13
+    // icon buttons centre on the glyph's own box; text buttons centre on cap
+    // height, which reads better for words
+    var centeredByBounds = false
     var busy = false { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
 
@@ -319,8 +322,17 @@ final class ButtonView: NSView {
         let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
         (busy ? palette.muted : palette.accent).setFill()
         r.fill()
-        drawMidCenter(busy ? "Saving…" : title, nerdFont("Bold", fontSize), palette.barBG,
-                      centerX: bounds.midX, midTop: bounds.height / 2, height: bounds.height)
+        let text = busy ? "Saving…" : title
+        let font = nerdFont("Bold", fontSize)
+        if centeredByBounds {
+            let attr = NSAttributedString(string: text,
+                attributes: [.font: font, .foregroundColor: palette.barBG])
+            let sz = attr.size()
+            attr.draw(at: NSPoint(x: bounds.midX - sz.width / 2, y: bounds.midY - sz.height / 2))
+        } else {
+            drawMidCenter(text, font, palette.barBG,
+                          centerX: bounds.midX, midTop: bounds.height / 2, height: bounds.height)
+        }
     }
 
     override func mouseDown(with event: NSEvent) { if !busy { onClick?() } }
@@ -1651,6 +1663,7 @@ final class ThemeGridView: NSView {
     var onChoose: (() -> Void)?
 
     private var customHeaderRect = NSRect.zero
+    private var separatorRect = NSRect.zero
     private let headerH: CGFloat = 34
     private let cellH: CGFloat = 180
     private let gapX: CGFloat = 14
@@ -1659,6 +1672,8 @@ final class ThemeGridView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         directoryButton.title = "\u{f07b}"
+        // an icon glyph, not text: centre it on its own box, not cap height
+        directoryButton.centeredByBounds = true
         directoryButton.onClick = { [weak self] in
             guard let d = self?.customDir else { return }
             NSWorkspace.shared.open(URL(fileURLWithPath: d))
@@ -1701,6 +1716,11 @@ final class ThemeGridView: NSView {
         // custom section
         let customIdx = cells.enumerated().filter { $0.element.isCustom }.map { $0.offset }
         if isCustomOn {
+            // a rule between the Omarchy grid and the custom grid, so the two
+            // galleries read as separate sections
+            top += 22
+            separatorRect = NSRect(x: 0, y: top, width: W, height: 1)
+            top += 1 + 22
             customHeaderRect = NSRect(x: 0, y: top, width: W, height: headerH)
             headers.append((customHeaderRect, "Custom Themes"))
             top += headerH + 8
@@ -1720,6 +1740,7 @@ final class ThemeGridView: NSView {
         headers = headers.map { (flip($0.0), $0.1) }
         if !isCustomOn { lockedMessageRect = flip(lockedMessageRect) }
         customHeaderRect = flip(customHeaderRect)
+        separatorRect = flip(separatorRect)
 
         // custom header controls
         let showControls = isCustomOn
@@ -1775,6 +1796,10 @@ final class ThemeGridView: NSView {
             drawTopLeft("Turn on Auto-Theme to preview your wallpapers",
                         nerdFont("Regular", 12), palette.muted,
                         x: 0, top: bounds.height - lockedMessageRect.maxY + 8, height: bounds.height)
+        }
+        if isCustomOn {
+            palette.muted.withAlphaComponent(0.25).setFill()
+            separatorRect.fill()
         }
         for (i, f) in cellFrames {
             drawCell(i, f)

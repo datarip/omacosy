@@ -90,24 +90,24 @@ The fixes this build offers upstream, and their state today.
 | PR | State | Title |
 | --- | --- | --- |
 | [#78](https://github.com/paulsp94/omacosy/pull/78) | OPEN | fix(install): restore the OmniWM chords right after the Karabiner reset |
-| [#77](https://github.com/paulsp94/omacosy/pull/77) | OPEN | feat(chords): the browser and mail chords follow the macOS defaults |
+| [#77](https://github.com/paulsp94/omacosy/pull/77) | MERGED | feat(chords): the browser and mail chords follow the macOS defaults |
 | [#76](https://github.com/paulsp94/omacosy/pull/76) | OPEN | fix(ws-collapse): the restore never drops a live window's record |
 | [#75](https://github.com/paulsp94/omacosy/pull/75) | MERGED | fix(ws-collapse): the fold map survives an OmniWM restart |
 | [#73](https://github.com/paulsp94/omacosy/pull/73) | OPEN | fix(spawn): a Super+F window leaves fullscreen before a new window opens beside it |
-| [#71](https://github.com/paulsp94/omacosy/pull/71) | OPEN | fix(ghostty): close a window without a prompt, as on Omarchy |
+| [#71](https://github.com/paulsp94/omacosy/pull/71) | MERGED | fix(ghostty): close a window without a prompt, as on Omarchy |
 | [#70](https://github.com/paulsp94/omacosy/pull/70) | MERGED | fix(spawn): a burst waits for each window to settle before the next one |
 | [#69](https://github.com/paulsp94/omacosy/pull/69) | MERGED | docs(readme): name the Screen Recording entries macOS checks |
 | [#68](https://github.com/paulsp94/omacosy/pull/68) | OPEN | fix(uninstall): remove the apps omacosy installed, and show what fails |
 | [#67](https://github.com/paulsp94/omacosy/pull/67) | MERGED | fix(uninstall): keep a backup of your settings, and say to open a new terminal |
 | [#66](https://github.com/paulsp94/omacosy/pull/66) | MERGED | fix(uninstall): restore recorded booleans |
 | [#65](https://github.com/paulsp94/omacosy/pull/65) | MERGED | docs(readme): one command to install or reinstall |
-| [#64](https://github.com/paulsp94/omacosy/pull/64) | OPEN | feat(install): test the signing certificate and clear stale permissions |
+| [#64](https://github.com/paulsp94/omacosy/pull/64) | MERGED | feat(install): test the signing certificate and clear stale permissions |
 | [#63](https://github.com/paulsp94/omacosy/pull/63) | MERGED | fix(ffm): stand down while OmniWM runs |
 | [#62](https://github.com/paulsp94/omacosy/pull/62) | CLOSED | fix(ws-collapse): restore keeps the map until the windows are back |
 | [#61](https://github.com/paulsp94/omacosy/pull/61) | MERGED | fix(toggle): on brings back the setup of this Mac's window manager |
 | [#60](https://github.com/paulsp94/omacosy/pull/60) | MERGED | fix(bar): one routine follows the window manager, and the bar stays when none answers |
 | [#59](https://github.com/paulsp94/omacosy/pull/59) | MERGED | feat(install): choose the window manager with --aerospace or --omniwm |
-| [#58](https://github.com/paulsp94/omacosy/pull/58) | OPEN | fix(wm-switch): the switch to OmniWM checks itself and does not ask |
+| [#58](https://github.com/paulsp94/omacosy/pull/58) | MERGED | fix(wm-switch): the switch to OmniWM checks itself and does not ask |
 | [#56](https://github.com/paulsp94/omacosy/pull/56) | MERGED | fix(install): a re-run keeps OmniWM when it is the window manager |
 | [#55](https://github.com/paulsp94/omacosy/pull/55) | MERGED | docs(readme): say where to run uninstall.sh and what to do after it |
 | [#54](https://github.com/paulsp94/omacosy/pull/54) | MERGED | fix(overview): hold the thumbnail in a let, not a mutable var |
@@ -129,7 +129,7 @@ The fixes this build offers upstream, and their state today.
 | [#35](https://github.com/paulsp94/omacosy/pull/35) | OPEN | fix(omniwm): one engine owns the four-finger swipe |
 | [#34](https://github.com/paulsp94/omacosy/pull/34) | MERGED | fix(wm-switch): a config swap reaches the daemon that reads it |
 | [#33](https://github.com/paulsp94/omacosy/pull/33) | MERGED | fix(gesture): the OmniWM swipe config points at another user's home |
-| [#32](https://github.com/paulsp94/omacosy/pull/32) | OPEN | fix(omniwm): tiled windows keep a margin from the screen edges |
+| [#32](https://github.com/paulsp94/omacosy/pull/32) | MERGED | fix(omniwm): tiled windows keep a margin from the screen edges |
 | [#31](https://github.com/paulsp94/omacosy/pull/31) | OPEN | feat(tiling): a workspace holding one window can fill the display |
 | [#30](https://github.com/paulsp94/omacosy/pull/30) | OPEN | feat(bar): one command for autohide and the top gap it implies |
 | [#29](https://github.com/paulsp94/omacosy/pull/29) | OPEN | feat(bar): split the top edge between this bar and the native one |
@@ -137,7 +137,7 @@ The fixes this build offers upstream, and their state today.
 | [#27](https://github.com/paulsp94/omacosy/pull/27) | OPEN | fix(helper): split-hint stacks slots that are wider than tall |
 | [#26](https://github.com/paulsp94/omacosy/pull/26) | MERGED | fix(aerospace): Super+Shift+F raises the Finder window instead of opening a new one |
 | [#25](https://github.com/paulsp94/omacosy/pull/25) | OPEN | fix(config): size the top gap from the display's safe-area inset |
-| [#24](https://github.com/paulsp94/omacosy/pull/24) | OPEN | fix(bar): take the bar height from the menu bar macOS draws |
+| [#24](https://github.com/paulsp94/omacosy/pull/24) | MERGED | fix(bar): take the bar height from the menu bar macOS draws |
 | [#23](https://github.com/paulsp94/omacosy/pull/23) | OPEN | fix(ffm): a full-display overlay stops hover focus everywhere |
 | [#22](https://github.com/paulsp94/omacosy/pull/22) | MERGED | fix(theme): the first Super+Shift+B after a theme change does nothing |
 | [#21](https://github.com/paulsp94/omacosy/pull/21) | MERGED | fix(bar): the activity chip keeps the old theme's accent |

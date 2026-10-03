@@ -420,6 +420,25 @@ final class CustomScroller: NSView {
     }
 }
 
+// --- arrow-key scrolling ---------------------------------------------------
+// A positive dy scrolls towards later content ("down"). Every document view
+// here is non-flipped, so later content sits at a *smaller* y origin: subtract
+// dy. Used by the arrow keys in the app picker and the dashboard's own tabs.
+
+func scrollBy(_ sv: NSScrollView, _ dy: CGFloat) {
+    guard let doc = sv.documentView else { return }
+    let clip = sv.contentView
+    let maxY = max(0, doc.frame.height - clip.bounds.height)
+    let y = max(0, min(maxY, clip.bounds.origin.y - dy))
+    clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+    sv.reflectScrolledClipView(clip)
+}
+
+// A tab with one vertical list the arrow keys can move.
+protocol ScrollStepTab: AnyObject {
+    func scrollStep(_ dy: CGFloat)
+}
+
 // --- options tab -----------------------------------------------------------
 
 struct OptionRow {
@@ -473,8 +492,15 @@ final class OptionsDocView: NSView {
     }
 }
 
-final class OptionsTabView: NSView {
+final class OptionsTabView: NSView, ScrollStepTab {
     private(set) var rows: [OptionRow] = []
+    func scrollStep(_ dy: CGFloat) { scrollBy(scroll, dy) }
+    func refreshColors() {
+        needsDisplay = true
+        doc.needsDisplay = true
+        for r in rows { r.seg.needsDisplay = true }
+        scroller.refresh()
+    }
     private var original = DashboardState()
     private var status = ""
     private let scroll = NSScrollView()
@@ -798,28 +824,89 @@ func writeWorkspaceRules(_ pairs: [(String, String)]) -> Bool {
 final class AppListView: NSView {
     var apps: [AppInfo] = []
     var onPick: ((String) -> Void)?
+    var selected: Int = 0
     let rowH: CGFloat = 30
+
+    private func rowRect(_ i: Int) -> NSRect {
+        let top = CGFloat(i) * rowH
+        return NSRect(x: 0, y: bounds.height - top - rowH, width: bounds.width, height: rowH)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         for (i, a) in apps.enumerated() {
-            let top = CGFloat(i) * rowH
-            let r = NSRect(x: 0, y: bounds.height - top - rowH, width: bounds.width, height: rowH)
-            if i % 2 == 1 {
+            let r = rowRect(i)
+            if i == selected, apps.indices.contains(selected) {
+                // the same accent the custom scrollers use, so a chosen row
+                // reads as "the one the arrows are on"
+                palette.accent.withAlphaComponent(0.85).setFill()
+                r.fill()
+            } else if i % 2 == 1 {
                 palette.itemBG.withAlphaComponent(0.25).setFill()
                 r.fill()
             }
             if let ic = iconForBundle(a.bundleID) {
                 ic.draw(in: NSRect(x: 6, y: r.midY - 8, width: 16, height: 16))
             }
-            drawMidLeft(a.name, nerdFont("Regular", 12), palette.label,
-                        x: 30, midTop: top + rowH / 2, height: bounds.height)
+            drawMidLeft(a.name, nerdFont("Regular", 12),
+                        i == selected ? palette.barBG : palette.label,
+                        x: 30, midTop: CGFloat(i) * rowH + rowH / 2, height: bounds.height)
         }
+    }
+
+    func moveSelection(_ delta: Int) {
+        guard !apps.isEmpty else { return }
+        let next = max(0, min(apps.count - 1, selected + delta))
+        guard next != selected else { return }
+        selected = next
+        needsDisplay = true
+        ensureVisible()
+    }
+
+    // keep the highlighted row inside the viewport as the arrows walk it
+    private func ensureVisible() {
+        guard let sv = enclosingScrollView, apps.indices.contains(selected) else { return }
+        let r = rowRect(selected)
+        let visible = sv.documentVisibleRect
+        var origin = sv.contentView.bounds.origin
+        if r.maxY > visible.maxY { origin.y = r.maxY - visible.height }
+        else if r.minY < visible.minY { origin.y = r.minY }
+        else { return }
+        let maxY = max(0, bounds.height - sv.contentSize.height)
+        origin.y = max(0, min(maxY, origin.y))
+        sv.contentView.scroll(to: origin)
+        sv.reflectScrolledClipView(sv.contentView)
+    }
+
+    private var trackingArea: NSTrackingArea?
+
+    // the highlighting follows the mouse as well as the arrows, so the row
+    // under the pointer is always the one Enter would apply
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero,
+                               options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingArea = t
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let i = Int((bounds.height - p.y) / rowH)
+        guard apps.indices.contains(i), i != selected else { return }
+        selected = i
+        needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let i = Int((bounds.height - p.y) / rowH)
-        if apps.indices.contains(i) { onPick?(apps[i].bundleID) }
+        if apps.indices.contains(i) {
+            selected = i
+            needsDisplay = true
+            onPick?(apps[i].bundleID)
+        }
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -911,6 +998,7 @@ final class AppPicker: NSObject, NSWindowDelegate {
         window.hasShadow = true
         window.level = .popUpMenu
         window.appearance = NSAppearance(named: .darkAqua)
+        window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.contentView = root
         root.titleText = title
@@ -965,7 +1053,15 @@ final class AppPicker: NSObject, NSWindowDelegate {
         // app, so a global monitor never sees it and the picker used to stay
         // up behind the modal.
         let km = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
-            if e.keyCode == 53 { self?.close(); return nil }
+            guard let self else { return e }
+            if e.keyCode == 53 { self.close(); return nil }
+            // the search field holds focus, so consume the arrows before it
+            // sees them: they scroll the list, one row a press
+            if e.window === self.window {
+                if e.keyCode == 126 { self.root.list.moveSelection(-1); return nil } // up
+                if e.keyCode == 125 { self.root.list.moveSelection(1); return nil }  // down
+                if e.keyCode == 36 || e.keyCode == 76 { self.pickSelected(); return nil } // return
+            }
             return e
         }
         let lm = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
@@ -981,8 +1077,15 @@ final class AppPicker: NSObject, NSWindowDelegate {
     @objc private func searchChanged() {
         let q = root.search.stringValue.lowercased()
         root.list.apps = q.isEmpty ? apps : apps.filter { $0.name.lowercased().contains(q) }
+        // a new result set starts with the top app highlighted
+        root.list.selected = 0
         root.list.needsDisplay = true
         root.relayout()
+    }
+
+    private func pickSelected() {
+        guard root.list.apps.indices.contains(root.list.selected) else { return }
+        pick(root.list.apps[root.list.selected].bundleID)
     }
 
     private func pick(_ bundle: String) {
@@ -1282,8 +1385,15 @@ final class WorkspaceRowView: NSView {
     }
 }
 
-final class WorkspacesTabView: NSView {
+final class WorkspacesTabView: NSView, ScrollStepTab {
     private var screens: [ScreenInfo] = []
+    func scrollStep(_ dy: CGFloat) { scrollBy(scroll, dy) }
+    func refreshColors() {
+        needsDisplay = true
+        screenSeg.needsDisplay = true
+        for r in rows { r.needsDisplay = true; r.subviews.forEach { $0.needsDisplay = true } }
+        scroller.refresh()
+    }
     private var allApps: [AppInfo] = []
     private var rules: [(String, String)] = []
     private var savedRules: [(String, String)] = []
@@ -1676,6 +1786,8 @@ final class ThemeGridView: NSView {
     let directoryButton = ButtonView()
     let chooseButton = ButtonView()
     var onChoose: (() -> Void)?
+    private var hoveredIndex: Int?
+    private var hoverTracking: NSTrackingArea?
 
     private var customHeaderRect = NSRect.zero
     private var separatorRect = NSRect.zero
@@ -1702,22 +1814,27 @@ final class ThemeGridView: NSView {
 
     func rebuild() {
         cellFrames.removeAll(); headers.removeAll()
+        hoveredIndex = nil
         let W = max(bounds.width, 120)
-        var cols = max(2, Int((W + gapX) / (216 + gapX)))
+        // keep a margin at both edges so the hover ring is never clipped by
+        // the scroll view's clip rect
+        let padX: CGFloat = 4
+        let usable = W - padX * 2
+        var cols = max(2, Int((usable + gapX) / (216 + gapX)))
         if cols < 2 { cols = 2 }
-        let cellW = (W - gapX * CGFloat(cols - 1)) / CGFloat(cols)
+        let cellW = (usable - gapX * CGFloat(cols - 1)) / CGFloat(cols)
 
         var top: CGFloat = 0
-        var x: CGFloat = 0
+        var x: CGFloat = padX
         var idx = 0
 
         func placeCell(_ cellIndex: Int) {
-            if x + cellW > W + 0.5 { x = 0; top += cellH + gapY }
+            if x + cellW > padX + usable + 0.5 { x = padX; top += cellH + gapY }
             let f = NSRect(x: x, y: top, width: cellW, height: cellH)
             cellFrames[cellIndex] = f
             x += cellW + gapX
         }
-        func endRow() { if x > 0 { top += cellH + gapY; x = 0 } }
+        func endRow() { if x > padX { top += cellH + gapY; x = padX } }
 
         let stockCount = cells.filter { !$0.isCustom }.count
         if stockCount > 0 {
@@ -1828,8 +1945,11 @@ final class ThemeGridView: NSView {
     private func drawCell(_ i: Int, _ f: NSRect) {
         let paletteH: CGFloat = 12
         let labelH: CGFloat = 18
-        let thumbRect = NSRect(x: f.minX, y: f.minY + paletteH + labelH + 4,
-                               width: f.width, height: f.height - paletteH - labelH - 4)
+        // leave room under the thumbnail for the hover ring (2 px) plus air
+        // before the theme name
+        let thumbGap: CGFloat = 12
+        let thumbRect = NSRect(x: f.minX, y: f.minY + paletteH + labelH + thumbGap,
+                               width: f.width, height: f.height - paletteH - labelH - thumbGap)
         let thumbCorner = min(windowCornerRadius(7), min(thumbRect.width, thumbRect.height) / 2)
         let thumb = NSBezierPath(roundedRect: thumbRect, xRadius: thumbCorner, yRadius: thumbCorner)
         NSGraphicsContext.current?.saveGraphicsState()
@@ -1846,6 +1966,14 @@ final class ThemeGridView: NSView {
         thumb.lineWidth = 1
         palette.muted.withAlphaComponent(0.3).setStroke()
         thumb.stroke()
+
+        // the focus-ring accent, drawn on the thumbnail's own outline: no gap
+        // to the picture, and it inherits the radius from windowCornerRadius()
+        if i == hoveredIndex {
+            thumb.lineWidth = 2
+            palette.accent.setStroke()
+            thumb.stroke()
+        }
 
         let title = truncate(cells[i].title, nerdFont("Regular", 11), f.width)
         drawTopLeft(title, nerdFont("Regular", 11), palette.label,
@@ -1891,6 +2019,30 @@ final class ThemeGridView: NSView {
         }
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = hoverTracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero,
+                               options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        hoverTracking = t
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let hit = cellFrames.first { $0.value.contains(p) }?.key
+        guard hit != hoveredIndex else { return }
+        hoveredIndex = hit
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard hoveredIndex != nil else { return }
+        hoveredIndex = nil
+        needsDisplay = true
+    }
 }
 
 func truncate(_ s: String, _ font: NSFont, _ maxW: CGFloat) -> String {
@@ -1900,9 +2052,15 @@ func truncate(_ s: String, _ font: NSFont, _ maxW: CGFloat) -> String {
     return out + "…"
 }
 
-final class ThemesTabView: NSView {
+final class ThemesTabView: NSView, ScrollStepTab {
     private let scroll = NSScrollView()
     private let grid = ThemeGridView()
+    func scrollStep(_ dy: CGFloat) { scrollBy(scroll, dy) }
+    func refreshColors() {
+        needsDisplay = true
+        grid.needsDisplay = true
+        scroller.refresh()
+    }
     private let scroller = CustomScroller()
     private let scrollerW: CGFloat = 8
     private var status = ""
@@ -2062,6 +2220,7 @@ final class UpdateTabView: NSView {
         addSubview(installButton)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+    func refreshColors() { needsDisplay = true; installButton.needsDisplay = true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -2225,12 +2384,22 @@ final class RootView: NSView {
         addSubview(logoView)
         addSubview(options)
         options.onApplied = { [weak self] in self?.needsDisplay = true }
-        themes.onApplied = { [weak self] in
-            palette = loadPalette()
-            self?.reloadLogo()
-            self?.needsDisplay = true
-        }
+        themes.onApplied = { [weak self] in self?.paletteChanged() }
         reloadLogo()
+    }
+
+    // A theme switch swaps the palette under the whole modal. Every surface
+    // draws its own colour, so each has to be told to repaint: the tab view,
+    // its document/list subviews and the custom scroller. Left alone they keep
+    // the old theme until the next scroll or hover.
+    func paletteChanged() {
+        palette = loadPalette()
+        reloadLogo()
+        options.refreshColors()
+        workspaces.refreshColors()
+        themes.refreshColors()
+        update.refreshColors()
+        needsDisplay = true
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -2350,10 +2519,18 @@ final class RootView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    private var activeTab: NSView {
+        selected == 0 ? options : (selected == 1 ? workspaces : (selected == 2 ? themes : update))
+    }
+
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 53: onHide?()
         case 43 where event.modifierFlags.contains([.command, .control, .option]): onHide?()
+        case 126: (activeTab as? ScrollStepTab)?.scrollStep(-48)   // up
+        case 125: (activeTab as? ScrollStepTab)?.scrollStep(48)    // down
+        case 123: showTab((selected + tabs.count - 1) % tabs.count) // left
+        case 124: showTab((selected + 1) % tabs.count)              // right
         default: break
         }
     }
@@ -2382,6 +2559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.backgroundColor = .clear
         w.hasShadow = true
         w.level = .popUpMenu
+        w.acceptsMouseMovedEvents = true
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         w.contentView = root
         w.onMouseDown = { [weak self] e in self?.root?.mouseDownAnywhere(e) }
@@ -2393,8 +2571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         watch("/tmp/omacosy-dashboard", create: true) { [weak self] in self?.toggle() }
         watch(HOME + "/.config/omarchy/current") { [weak self] in
-            palette = loadPalette()
-            self?.root?.reloadLogo()
+            self?.root?.paletteChanged()
         }
         show()
     }

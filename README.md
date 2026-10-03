@@ -351,9 +351,12 @@ with four tabs:
 - **Update** — `omacosy-update --check`, with the install button behind it.
 
 It reads and writes the same files and commands as the CLI, so the window and
-the shell can never disagree, and it follows the theme palette — its wordmark
-included. `bin/omacosy-dashboard` is a single-instance launcher: the first
-press opens it, later presses toggle the one window it owns.
+the shell can never disagree, and it follows the theme palette — its wordmark,
+the lists and their scrollbars included. Up and Down scroll a list, Left and
+Right move between tabs, and the app picker highlights the row under the
+keyboard or the pointer and applies it on Return; a theme card takes an accent
+ring under the pointer. `bin/omacosy-dashboard` is a single-instance launcher:
+the first press opens it, later presses toggle the one window it owns.
 
 ## Commands
 

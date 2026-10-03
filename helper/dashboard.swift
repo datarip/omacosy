@@ -1516,7 +1516,7 @@ final class WorkspacesTabView: NSView {
 
 // --- themes tab ------------------------------------------------------------
 
-struct ThemeCell {
+struct ThemeCell: Equatable {
     let logical: String
     let wallpaper: String
     let title: String
@@ -1786,10 +1786,14 @@ final class ThemeGridView: NSView {
             if c.isCustom { pal = customPalette(c.wallpaper) }
             else { pal = parseColorsToml(c.paletteFile) }
             DispatchQueue.main.async {
-                self?.thumbs[i] = img
-                self?.palettes[i] = pal
-                self?.pending.remove(i)
-                self?.needsDisplay = true
+                // a reload may have reshuffled the cells while this was in
+                // flight; only land on the cell it was decoded for
+                guard let self, self.cells.indices.contains(i),
+                      self.cells[i].wallpaper == c.wallpaper else { return }
+                self.thumbs[i] = img
+                self.palettes[i] = pal
+                self.pending.remove(i)
+                self.needsDisplay = true
             }
         }
     }
@@ -1951,10 +1955,43 @@ final class ThemesTabView: NSView {
     @objc private func visibleChanged() { grid.loadVisible(scroll.documentVisibleRect); scroller.refresh() }
 
     func reload() {
-        grid.cells = stockVariants() + customVariants()
-        grid.customDir = customWallpaperDir()
-        grid.isCustomOn = (readConfKey(AUTOCONF, "auto-theme") ?? "off") == "on"
-        grid.thumbs.removeAll(); grid.palettes.removeAll(); grid.pending.removeAll()
+        let cells = stockVariants() + customVariants()
+        let dir = customWallpaperDir()
+        let isOn = (readConfKey(AUTOCONF, "auto-theme") ?? "off") == "on"
+
+        // Re-entering the tab re-reads the shelves. When nothing changed,
+        // leave the decoded thumbnails and palettes exactly as they are:
+        // clearing them repaints a grid of "loading…" placeholders for a
+        // frame, which reads as a flicker when the gallery is already at
+        // the top and no scroll motion hides it.
+        if cells == grid.cells, dir == grid.customDir, isOn == grid.isCustomOn {
+            needsGridRebuild = true
+            needsLayout = true
+            return
+        }
+
+        // The set changed: keep what is still valid, keyed by wallpaper,
+        // because an added or removed picture shifts every index.
+        var decodedThumbs: [String: NSImage] = [:]
+        var decodedPalettes: [String: [NSColor]] = [:]
+        for (i, c) in grid.cells.enumerated() {
+            if let t = grid.thumbs[i] { decodedThumbs[c.wallpaper] = t }
+            if let p = grid.palettes[i] { decodedPalettes[c.wallpaper] = p }
+        }
+
+        grid.cells = cells
+        grid.customDir = dir
+        grid.isCustomOn = isOn
+
+        var thumbs: [Int: NSImage] = [:]
+        var palettes: [Int: [NSColor]] = [:]
+        for (i, c) in cells.enumerated() {
+            if let t = decodedThumbs[c.wallpaper] { thumbs[i] = t }
+            if let p = decodedPalettes[c.wallpaper] { palettes[i] = p }
+        }
+        grid.thumbs = thumbs
+        grid.palettes = palettes
+        grid.pending.removeAll()
         needsGridRebuild = true
         needsLayout = true
     }

@@ -246,6 +246,17 @@ func readState() -> DashboardState {
     return s
 }
 
+// The radius macOS draws window corners with, when the user has set one.
+// omacosy-window-corners writes NSConvolutionOverride1, and this modal's
+// borderless card gets no rounding from macOS, so it reads the value back
+// to stay consistent with every other window. Absent means macOS's own
+// radius, and the card keeps its rounded default.
+func windowCornerRadius(_ fallback: CGFloat) -> CGFloat {
+    guard let n = UserDefaults.standard.object(forKey: "NSConvolutionOverride1") as? NSNumber
+    else { return fallback }
+    return CGFloat(n.doubleValue)
+}
+
 // --- controls --------------------------------------------------------------
 
 final class SegmentedView: NSView {
@@ -2252,7 +2263,8 @@ final class RootView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10)
+        let corner = min(windowCornerRadius(10), min(bounds.width, bounds.height) / 2)
+        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: corner, yRadius: corner)
         palette.barBG.setFill()
         body.fill()
         palette.accent.setStroke()

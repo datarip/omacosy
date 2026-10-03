@@ -1728,6 +1728,17 @@ let rowHeight: CGFloat = 26
 let popupPad: CGFloat = 8
 let popupRadius: CGFloat = 8
 
+// The radius macOS draws window corners with, when the user has set one.
+// omacosy-window-corners writes NSConvolutionOverride1, and a borderless
+// window gets no rounding from macOS, so the cards drawn here read the
+// value back to stay consistent with every other window. Absent means
+// macOS's own radius, and the card keeps its rounded default.
+func windowCornerRadius(_ fallback: CGFloat) -> CGFloat {
+    guard let n = UserDefaults.standard.object(forKey: "NSConvolutionOverride1") as? NSNumber
+    else { return fallback }
+    return CGFloat(n.doubleValue)
+}
+
 final class PopupView: NSView {
     var rows: [PopupRow] = []
     private var rowRects: [(Int, NSRect)] = []
@@ -1959,7 +1970,7 @@ func showPopup(_ name: String, under anchor: NSRect, on surface: BarSurface, ali
     scroll.autohidesScrollers = true
     scroll.documentView = view
     scroll.wantsLayer = true
-    scroll.layer?.cornerRadius = popupRadius
+    scroll.layer?.cornerRadius = min(windowCornerRadius(popupRadius), min(size.width, winH) / 2)
     scroll.layer?.masksToBounds = true
     scroll.layer?.borderWidth = 1
     scroll.layer?.borderColor = palette.accent.cgColor
@@ -2786,8 +2797,9 @@ final class CheatsheetView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let corner = min(windowCornerRadius(popupRadius), min(bounds.width, bounds.height) / 2)
         let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
-                                xRadius: popupRadius, yRadius: popupRadius)
+                                xRadius: corner, yRadius: corner)
         palette.barBG.setFill()
         body.fill()
         palette.accent.setStroke()

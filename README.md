@@ -319,7 +319,7 @@ Your values live in one file outside the clone,
 | `TERMINAL`, `BROWSER`, `EMAIL`, `MUSIC`, `MESSENGER` | the apps the launch chords open. The defaults are Ghostty, Spotify and Slack; an empty `BROWSER` or `EMAIL` makes that chord follow the Mac's default web browser or mail app (how to change those is in [docs/customising.md](docs/customising.md)) |
 | `APP_WORKSPACE_RULES` | the workspace an app's windows open on |
 | `APP_FLOAT_RULES` | the windows that float instead of tile, under OmniWM |
-| `RING_RADIUS`, `WINDOW_CORNER` | the focus ring radius, and the radius macOS draws window corners with |
+| `RING_RADIUS`, `WINDOW_CORNER` | the focus ring radius, and the radius macOS draws window corners with. The `Super+K` cheatsheet, the popup panel under a bar pill and the Settings card are drawn by Omacosy, so they follow the same corner; the bar's pills stay rounded |
 | `AUTOHIDE` | whether the bar hides at rest: `off`, `on` or `auto`. `omacosy-bar-autohide` keeps it current, so your choice survives a reinstall |
 | `SERIALIZE_APP_SPAWNS` | one window at a time from a burst of presses on the music and messenger chords |
 
@@ -367,7 +367,7 @@ The commands you run:
 | `omacosy-toggle [on\|off]` | parks the whole setup without uninstalling it. No argument flips |
 | `omacosy-bar-autohide on\|off\|auto\|status` | sets whether the bar hides at rest, and the top gap that goes with it |
 | `omacosy-solo-fullscreen on\|off\|status` | a workspace with one tiled window fills the display. Off by default |
-| `omacosy-window-corners [square\|round\|<radius>]` | sets the radius macOS draws window corners with. No argument shows it |
+| `omacosy-window-corners [square\|round\|<radius>]` | sets the radius macOS draws window corners with; the `Super+K` cheatsheet, the popup panel under a bar pill and the Settings card follow it. No argument shows it |
 | `omacosy-harvest-zshrc` | moves the lines installers appended to `~/.zshrc` into `~/.zshrc.local` |
 | `omacosy-auto-theme on\|off\|status` | whether your own wallpapers become themes, with the terminal and its tools to match. `on desktop-only` themes the desktop alone. Off by default |
 | `theme-set <name>` | switches the whole theme |

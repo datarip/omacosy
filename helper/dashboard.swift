@@ -482,6 +482,9 @@ final class OptionsTabView: NSView {
     private let scroller = CustomScroller()
     private let scrollerW: CGFloat = 8
     let saveButton = ButtonView()
+    // the root draws the card, which follows the window-corner setting; a
+    // saved change must redraw it at once, not wait for a tab switch
+    var onApplied: (() -> Void)?
     private let bottomBarH: CGFloat = 54
     private var lastDocH: CGFloat = -1
 
@@ -626,6 +629,7 @@ final class OptionsTabView: NSView {
                 self?.status = "Saved"
                 self?.saveButton.busy = false
                 self?.needsDisplay = true
+                self?.onApplied?()
             }
         }
     }
@@ -2182,6 +2186,7 @@ final class RootView: NSView {
         logoView.imageScaling = .scaleProportionallyUpOrDown
         addSubview(logoView)
         addSubview(options)
+        options.onApplied = { [weak self] in self?.needsDisplay = true }
         themes.onApplied = { [weak self] in
             palette = loadPalette()
             self?.reloadLogo()

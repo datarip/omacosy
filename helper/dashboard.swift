@@ -1826,7 +1826,8 @@ final class ThemeGridView: NSView {
         let labelH: CGFloat = 18
         let thumbRect = NSRect(x: f.minX, y: f.minY + paletteH + labelH + 4,
                                width: f.width, height: f.height - paletteH - labelH - 4)
-        let thumb = NSBezierPath(roundedRect: thumbRect, xRadius: 7, yRadius: 7)
+        let thumbCorner = min(windowCornerRadius(7), min(thumbRect.width, thumbRect.height) / 2)
+        let thumb = NSBezierPath(roundedRect: thumbRect, xRadius: thumbCorner, yRadius: thumbCorner)
         NSGraphicsContext.current?.saveGraphicsState()
         thumb.setClip()
         if let img = thumbs[i] {

@@ -197,6 +197,15 @@ func windowCandidates() -> [Cand] {
         // subsumes containment, the 100% case, so there is one rule here
         // instead of two.
         //
+        // The overlay must also be BIGGER than the window it covers. That
+        // is what separates a decoration from a panel that merely sits
+        // over a small window: a decoration is inflated around its window
+        // and so is larger, while a Touch ID prompt or a Raycast panel is
+        // not. Without this, the 70% test would drop such a panel over a
+        // small window and hover would steal focus from it. By AREA, not
+        // both dimensions: the 702x1027 shape above is narrower than the
+        // 718x883 Safari it covers (702 < 718) but larger overall.
+        //
         // Same-app is deliberately excluded: an app drawing a shade over
         // its own window is doing it on purpose, and blocking is right.
         if blocking, screens.contains(where: { scr in
@@ -207,6 +216,7 @@ func windowCandidates() -> [Cand] {
             guard $0.pid != pid else { return false }
             let i = rect.intersection($0.rect)
             return !i.isNull && i.width * i.height >= $0.rect.width * $0.rect.height * 0.7
+                && rect.width * rect.height > $0.rect.width * $0.rect.height
         }) { continue }
         // AeroSpace hides inactive-workspace windows mostly offscreen
         // with a sliver visible — ignore anything <30% on-screen

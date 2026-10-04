@@ -1,8 +1,10 @@
-// omacosy-recall — Cmd+H and the Dock icon behave, under OmniWM.
+// omacosy-recall — hiding the last window of a workspace must not move you.
 //
-// Two OmniWM behaviours are answered here. Both were measured on 0.6.10.
+// One OmniWM behaviour is answered here, measured on 0.6.10 and still present
+// on 0.7.4. The daemon's other half — the Dock click on a hidden app — was
+// fixed in OmniWM 0.7.2 (#704) and has been removed.
 //
-// 1. Hiding the last window of a workspace takes you off that workspace.
+// Hiding the last window of a workspace takes you off that workspace.
 //    Not a window-manager bug as such: macOS hands the front to another app
 //    the instant the front one hides, and OmniWM faithfully follows that
 //    activation to the other app's workspace. Measured order for one Cmd+H,
@@ -34,21 +36,11 @@
 //    stands down under OmniWM, and could not judge this case anyway: the
 //    Cmd+H that caused it IS real user input.
 //
-// 2. Clicking the Dock icon of a hidden app does not bring you to it.
-//    OmniWM DOES follow a plain activation — activate an app that is
-//    merely on another workspace and it switches there. It skips that path
-//    when the app is macOS-hidden, because at the instant of the
-//    activation the window is still hidden and not eligible to be focused.
-//    The unhide lands after the decision, and the only rule left matching a
-//    visible window on an inactive workspace is "park it off-screen": the
-//    window is moved to x = display width - 1 and the app is hidden again
-//    ~1.7 s later. One frame is drawn before the park. That is the flicker.
-//
-//    macOS posts didActivateApplication ~35 ms BEFORE didUnhideApplication.
-//    Switching on the activate gets the workspace right before the window
-//    is ever drawn, so OmniWM's park rule never matches and there is
-//    nothing to flicker. The unhide is kept as a backstop for when that
-//    race is lost.
+// The daemon's other half — clicking the Dock icon of a hidden app did not
+// bring you to it — was fixed in OmniWM 0.7.2 (#704): the Dock click now
+// switches (with a small flicker). That path and its observers are gone.
+// This hide case is reported upstream as OmniNull/OmniWM#793, so the daemon
+// can go when OmniWM stops following the hide activation.
 //
 // Everything above happens in a 43 ms window, so nothing in the path may be
 // slow. This talks to OmniWM's socket directly and keeps it open, keeps the
@@ -68,10 +60,9 @@
 // it feeds the window cache, and it puts the desktop back if OmniWM moves
 // anyway. That correction is the backstop, not the mechanism.
 //
-// AeroSpace has no such bug. This process stays resident under it and acts
-// only while it holds a live subscription to OmniWM: at login it starts
-// before OmniWM answers its socket, and omacosy-wm-switch changes manager
-// mid-session.
+// AeroSpace has no such bug. omacosy-wm-switch loads this agent while OmniWM
+// runs and unloads it under AeroSpace, so it never idles there; at login it
+// starts before OmniWM answers its socket, and retries until it does.
 //
 // Modes:
 //   (none)      run in the foreground and act
@@ -346,7 +337,6 @@ func allWindows() -> [Win] {
 // What the stream last said, or a fresh read when it has said nothing.
 func knownWindows() -> [Win] { windowCache.fresh(within: 10) ?? allWindows() }
 
-func windows(ofPid pid: Int) -> [Win] { knownWindows().filter { $0.pid == pid } }
 
 // The same read as activeByDisplay, with the names kept, for seeding the
 // stream's picture each time it attaches to OmniWM.
@@ -526,7 +516,11 @@ func catchTheHide(_ wins: [Win], at now: Date) {
               onIt.allSatisfy({ $0.isAppHidden })
         else { continue }
         keeper.arm(spot, since: now, seconds: 1.2)
-        parkFront(given: wins, why: "workspace \(spot.workspaceName) went dark", since: now)
+        // This runs on the watcher thread, and parkFront reaches AppKit
+        // (Finder lookup, activate). Keep it on the main queue, where the
+        // hide notification path and the finderApp cache also live.
+        let why = "workspace \(spot.workspaceName) went dark"
+        DispatchQueue.main.async { _ = parkFront(given: wins, why: why, since: now) }
     }
 }
 
@@ -700,56 +694,6 @@ func stay(_ app: NSRunningApplication) {
     hold(target, "hide", since: asked, beats: [0.0, 0.02, 0.05, 0.10, 0.20, 0.40, 0.80])
 }
 
-// --- 2. recalling a hidden app must bring you to it -------------------------
-
-var lastRecall: [Int: Date] = [:]
-
-func recall(_ app: NSRunningApplication, on event: String) {
-    guard attached.get() else { return }
-    let pid = Int(app.processIdentifier)
-    let name = app.localizedName ?? "pid \(pid)"
-
-    // One act per app per second: activate and unhide are the same Dock
-    // click, and the unhide is only here for when the activate lost the race.
-    if let last = lastRecall[pid], Date().timeIntervalSince(last) < 1.0 { return }
-
-    let mine = windows(ofPid: pid)
-    guard !mine.isEmpty else {
-        if verbose { tlog("\(name) \(event), no OmniWM-managed window") }
-        return
-    }
-    let active = activeByDisplay()
-    guard let target = mine.first(where: { active[$0.displayId] != $0.workspaceId }) else {
-        if verbose { tlog("\(name) \(event), already on a visible workspace") }
-        return
-    }
-
-    let asked = Date()
-    lastRecall[pid] = asked
-    if dryRun {
-        tlog("\(name) \(event) — would switch to workspace \(target.workspaceName)")
-        return
-    }
-    tlog("\(name) \(event) -> workspace \(target.workspaceName)")
-    focusWorkspace(target.workspaceName)
-
-    // The switch is what you see; focusing the window inside it is tidiness.
-    omni.navigate(window: target.id)
-
-    // OmniWM decided to park and re-hide before the switch was asked for,
-    // and that decision still lands when the activate race is lost.
-    hold(target.spot, "recall", since: asked, beats: [0.30, 0.80, 1.60, 2.40])
-    for delay in [0.35, 0.90, 1.70, 2.50] {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard lastUserInput() < asked.addingTimeInterval(0.25) else { return }
-            guard let live = NSRunningApplication(processIdentifier: pid_t(pid)),
-                  live.isHidden else { return }
-            tlog("\(name): re-hidden at +\(delay)s -> unhide")
-            live.unhide()
-        }
-    }
-}
-
 // --- wiring ---------------------------------------------------------------
 
 if wantDaemon {
@@ -780,23 +724,12 @@ nc.addObserver(forName: NSWorkspace.didHideApplicationNotification,
     stay(app)
 }
 
-// The early signal. Only a HIDDEN app needs us: OmniWM follows the
-// activation of a visible one by itself, and that path is left alone.
+// Whose activation preceded the hide, for wasInFront above.
 nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                object: nil, queue: .main) { note in
     guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
     else { return }
     noteActivation(Int(app.processIdentifier))
-    guard app.isHidden else { return }
-    recall(app, on: "activated while hidden")
-}
-
-// The backstop, for when the activate arrives too late or not at all.
-nc.addObserver(forName: NSWorkspace.didUnhideApplicationNotification,
-               object: nil, queue: .main) { note in
-    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-    else { return }
-    recall(app, on: "unhid")
 }
 
 if !dryRun {

@@ -60,6 +60,8 @@ start_aerospace_world() {
   # for a whole session after a switch back from OmniWM.
   launchctl load "$HOME/Library/LaunchAgents/com.omacosy.solo.plist" 2>/dev/null || true
   launchctl kickstart -k "gui/$(id -u)/com.omacosy.solo" 2>/dev/null || true
+  # recall answers an OmniWM behaviour, not AeroSpace's: unload it here
+  launchctl bootout "gui/$(id -u)/com.omacosy.recall" 2>/dev/null || true
 }
 
 stop_aerospace_world() {
@@ -153,6 +155,8 @@ omniwm)
   # so the copy above needs a real restart and not just a bootstrap
   launchctl load "$HOME/Library/LaunchAgents/com.omacosy.gesture.plist" 2>/dev/null || true
   launchctl kickstart -k "gui/$(id -u)/com.omacosy.gesture" 2>/dev/null || true
+  # recall answers a Cmd+H behaviour OmniWM has, so it runs only under it
+  launchctl load "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" 2>/dev/null || true
   # omacosy-solo decides at STARTUP which manager it is serving: under
   # aerospace it runs the solo-fullscreen rule, under OmniWM it keeps the outer
   # gaps in step with the visible workspace instead. A handover leaves it in

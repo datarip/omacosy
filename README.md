@@ -311,7 +311,7 @@ typing or app shortcuts. Caps Lock tapped alone is Escape.
 | `Super+t` | toggle floating |
 | `Super+j` | toggle split direction |
 | `Super+-` / `Super+=` | resize |
-| `Super+f` | fullscreen — on notched displays the camera strip is blacked out so it reads as true fullscreen, while the window stays in its workspace (swipes still reach it) |
+| `Super+f` | zoom the focused window inside its workspace — the outer gaps and the bar strip stay, so it reads as one enlarged tile rather than true fullscreen (it stays in its workspace; swipes still reach it) |
 | `Super+n` | native macOS fullscreen (a separate Space — outside the workspace model, avoid unless an app needs it) |
 | `Super+r` | resize mode (`h/j/k/l`, `-`/`=`, `esc`) — AeroSpace only; OmniWM has no binding modes |
 | `Super+shift+;` | service mode (`esc` reload, `r` flatten, `⌫` close others) |

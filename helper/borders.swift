@@ -17,16 +17,20 @@
 // deliver nothing without it.
 import AppKit
 
-// install.sh calls `omacosy-borders --request-accessibility` once, at install
-// time, for the optional Accessibility grant. The daemon never prompts: with
-// KeepAlive, prompting at launch would ask again at every login for a user who
-// declined. Without the grant the ring falls back to watchAfterClick.
-if CommandLine.arguments.contains("--request-accessibility") {
-    if !AXIsProcessTrusted() {
-        _ = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
-    }
-    exit(0)
+// The optional Accessibility grant, asked once — by the daemon itself, so
+// macOS records it against omacosy-borders and not the terminal that ran
+// install.sh. A marker records the ask, so a user who declines is not
+// prompted again at every login (KeepAlive restarts the daemon). After it,
+// the daemon only reads AXIsProcessTrusted(); without the grant the ring
+// falls back to watchAfterClick.
+let axAskedMarker = NSString(string: "~/.config/omacosy/borders-ax-asked").expandingTildeInPath
+if !AXIsProcessTrusted(), !FileManager.default.fileExists(atPath: axAskedMarker) {
+    try? FileManager.default.createDirectory(
+        atPath: (axAskedMarker as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true)
+    _ = FileManager.default.createFile(atPath: axAskedMarker, contents: nil)
+    _ = AXIsProcessTrustedWithOptions(
+        [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
 }
 
 // --- SkyLight externs ---------------------------------------------------
@@ -989,10 +993,10 @@ func watchAfterClick() {
 let clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { _ in
     if !AXIsProcessTrusted() { watchAfterClick() }
 }
-// The Accessibility prompt is asked once, by install.sh
-// (--request-accessibility), never here: the daemon only checks
-// AXIsProcessTrusted() (watchClose, the click monitor), so a declined grant
-// is not re-asked at every login.
+// The Accessibility prompt is asked once, by the daemon at startup and
+// recorded with a marker (above), so a declined grant is not re-asked at
+// every login. Here we only read AXIsProcessTrusted() (watchClose, the
+// click monitor).
 
 // safety net for anything eventless (subscription races, missed
 // events): cheap at this cadence, and the only whole-list poll

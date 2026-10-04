@@ -704,12 +704,9 @@ clear_if_changed omacosy-ffm com.omacosy.ffm
 # would be overwritten and every rebuild would invalidate the
 # Accessibility grant again)
 
-# Ask for the optional Accessibility grant once, here, so the daemon never
-# prompts at launch (KeepAlive would re-ask at every login). Prompts only when
-# the grant is missing; refusing it only makes a Cmd-W close heard ~0.25 s late.
-if [ -x "$HOME/.local/bin/omacosy-borders" ]; then
-  "$HOME/.local/bin/omacosy-borders" --request-accessibility >/dev/null 2>&1 || true
-fi
+# (the optional Accessibility grant is asked by omacosy-borders itself, once,
+# at daemon startup — see helper/borders.swift. Calling it from here put the
+# prompt on the terminal, so the grant landed on the terminal's entry.)
 
 # hover-ignore list (launchd agents can't read ~/Documents — copied)
 mkdir -p "$HOME/.config/omacosy"

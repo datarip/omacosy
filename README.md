@@ -124,7 +124,7 @@ The fixes this build offers upstream, and their state today.
 | [#41](https://github.com/paulsp94/omacosy/pull/41) | MERGED | fix(uninstall): stop relinking ~/.zshrc to one machine's dotfiles path |
 | [#40](https://github.com/paulsp94/omacosy/pull/40) | MERGED | fix(install): quote the app names written to apps.conf |
 | [#39](https://github.com/paulsp94/omacosy/pull/39) | MERGED | fix(install): match Karabiner's current agent label |
-| [#37](https://github.com/paulsp94/omacosy/pull/37) | OPEN | fix(gesture): the trackpad arms at once when OmniWM is the manager |
+| [#37](https://github.com/paulsp94/omacosy/pull/37) | OPEN | fix(gesture): a slow or absent window-manager socket never blocks startup |
 | [#36](https://github.com/paulsp94/omacosy/pull/36) | CLOSED | fix(bar): a window-manager switch is noticed while the bar runs |
 | [#35](https://github.com/paulsp94/omacosy/pull/35) | OPEN | fix(omniwm): one engine owns the four-finger swipe |
 | [#34](https://github.com/paulsp94/omacosy/pull/34) | MERGED | fix(wm-switch): a config swap reaches the daemon that reads it |

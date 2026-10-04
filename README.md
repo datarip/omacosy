@@ -138,7 +138,7 @@ The fixes this build offers upstream, and their state today.
 | [#26](https://github.com/paulsp94/omacosy/pull/26) | MERGED | fix(aerospace): Super+Shift+F raises the Finder window instead of opening a new one |
 | [#25](https://github.com/paulsp94/omacosy/pull/25) | OPEN | fix(config): size the top gap from the display's safe-area inset |
 | [#24](https://github.com/paulsp94/omacosy/pull/24) | MERGED | fix(bar): take the bar height from the menu bar macOS draws |
-| [#23](https://github.com/paulsp94/omacosy/pull/23) | OPEN | fix(ffm): a full-display overlay stops hover focus everywhere |
+| [#23](https://github.com/paulsp94/omacosy/pull/23) | OPEN | fix(ffm): app-wide overlays stop hover focus everywhere |
 | [#22](https://github.com/paulsp94/omacosy/pull/22) | MERGED | fix(theme): the first Super+Shift+B after a theme change does nothing |
 | [#21](https://github.com/paulsp94/omacosy/pull/21) | MERGED | fix(bar): the activity chip keeps the old theme's accent |
 <!-- upstream-prs:end -->

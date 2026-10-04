@@ -541,9 +541,26 @@ case "split-hint":
     // that changes at random. So keep 1.4 where it was meant to apply
     // and fall back to Hyprland's default below that. The threshold is
     // a judgement call rather than a measured boundary.
-    let wideDisplayWidth: CGFloat = 2560
-    let splitWidthMultiplier: CGFloat =
-        CGDisplayBounds(CGMainDisplayID()).width >= wideDisplayWidth ? 1.4 : 1.0
+    //
+    // The multiplier belongs to the display the window is on, not the main
+    // one: a laptop beside an ultrawide must use each screen's own width.
+    // The window's frame is read here anyway for the refocus path, so its
+    // centre names the display.
+    let winFrame = frame()
+    func splitMultiplier(for f: (CGFloat, CGFloat, CGFloat, CGFloat)?) -> CGFloat {
+        let wide: CGFloat = 2560
+        guard let f else { return CGDisplayBounds(CGMainDisplayID()).width >= wide ? 1.4 : 1.0 }
+        let center = CGPoint(x: f.0 + f.2 / 2, y: f.1 + f.3 / 2)
+        var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+        var n: UInt32 = 0
+        if CGGetActiveDisplayList(8, &ids, &n) == .success {
+            for i in 0..<Int(n) where CGDisplayBounds(ids[i]).contains(center) {
+                return CGDisplayBounds(ids[i]).width >= wide ? 1.4 : 1.0
+            }
+        }
+        return CGDisplayBounds(CGMainDisplayID()).width >= wide ? 1.4 : 1.0
+    }
+    let splitWidthMultiplier = splitMultiplier(for: winFrame)
     func direction(_ w: CGFloat, _ h: CGFloat) -> String {
         w >= h * splitWidthMultiplier ? "horizontal" : "vertical"
     }
@@ -619,7 +636,7 @@ case "split-hint":
         // been checked yet is how a close poisoned the whole burst.
         if s.w >= s.h * splitWidthMultiplier { w = s.w / 2; h = s.h } else { w = s.w; h = s.h / 2 }
         how = "predicted"
-    } else if state != nil, wid <= max(maxWid, state!.wid), let f = frame() {
+    } else if state != nil, wid <= max(maxWid, state!.wid), let f = winFrame {
         // an existing window refocused mid-burst: usually settled, and
         // checked below for when it is not
         (w, h) = (f.2, f.3)

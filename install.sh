@@ -565,7 +565,9 @@ PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.borders.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.omacosy.borders.plist"
 
-# resident under both managers; restart-on-failure brings back a crash.
+# answers a Cmd+H behaviour OmniWM has; AeroSpace does not, and the daemon
+# would only idle there, so it loads only under OmniWM (omacosy-wm-switch
+# loads and unloads it on a handover). KeepAlive brings back a crash.
 cat > "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -580,7 +582,9 @@ cat > "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" <<PLIST
 </plist>
 PLIST
 launchctl unload "$HOME/Library/LaunchAgents/com.omacosy.recall.plist" 2>/dev/null || true
-launchctl load "$HOME/Library/LaunchAgents/com.omacosy.recall.plist"
+if [ "$WM" = omniwm ]; then
+  launchctl load "$HOME/Library/LaunchAgents/com.omacosy.recall.plist"
+fi
 
 cat > "$HOME/Library/LaunchAgents/com.omacosy.ffm.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

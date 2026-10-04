@@ -433,7 +433,12 @@ launchctl kickstart -k "gui/$(id -u)/org.pqrs.service.agent.Karabiner-Console-Us
 # later failure — a build, or the update killed mid-run — cannot leave the
 # keyboard without its exec chords. The OmniWM handover near the end runs
 # this again once apps.conf is final.
-if [ "$WM" = omniwm ]; then
+#
+# Not while AeroSpace is still running: these rules must never be active
+# under AeroSpace, whose own bindings grab the same chords (both would
+# fire). When AeroSpace is up, the handover below stops it and injects the
+# layer itself.
+if [ "$WM" = omniwm ] && ! pgrep -x AeroSpace >/dev/null; then
   "$REPO_DIR/bin/omacosy-karabiner-omniwm" install >/dev/null 2>&1 \
     || log "WARNING: could not restore the OmniWM chords; run: omacosy-karabiner-omniwm install"
 fi

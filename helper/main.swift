@@ -442,13 +442,33 @@ case "split-hint":
         return (sample, moved)
     }
     // Direction: Hyprland's rule is `stack when h * multiplier > w`
-    // (dwindle:split_width_multiplier, default 1.0). At 1.0 an
-    // ultrawide's half-slot (1712x1389) is still wider than tall, so
-    // the spiral goes side-by-side twice before it ever stacks. 1.4
-    // makes that half-slot stack first, which restores the 16:9
-    // left/down/left cadence on a 3440-wide display without changing
-    // behavior on displays where the half is already taller than wide.
-    let splitWidthMultiplier: CGFloat = 1.4
+    // (dwindle:split_width_multiplier, default 1.0). At 1.0 an ultrawide's
+    // half-slot (1712x1389) is still wider than tall, so the spiral goes
+    // side-by-side twice before it ever stacks. 1.4 makes that half-slot
+    // stack first, restoring the 16:9 left/down/left cadence on a 3440-wide
+    // display. On a narrower display 1.4 instead stacks slots that are wider
+    // than tall, so the direction looks random; there Hyprland's 1.0 applies.
+    //
+    // The multiplier belongs to the display the window is on, not the main
+    // one: a laptop beside an ultrawide must use each screen's own width.
+    // The window's frame is read here anyway for the refocus path, so its
+    // centre names the display. The 2560 threshold is a judgement call, not a
+    // measured boundary.
+    let winFrame = frame()
+    func splitMultiplier(for f: (CGFloat, CGFloat, CGFloat, CGFloat)?) -> CGFloat {
+        let wide: CGFloat = 2560
+        guard let f else { return CGDisplayBounds(CGMainDisplayID()).width >= wide ? 1.4 : 1.0 }
+        let center = CGPoint(x: f.0 + f.2 / 2, y: f.1 + f.3 / 2)
+        var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+        var n: UInt32 = 0
+        if CGGetActiveDisplayList(8, &ids, &n) == .success {
+            for i in 0..<Int(n) where CGDisplayBounds(ids[i]).contains(center) {
+                return CGDisplayBounds(ids[i]).width >= wide ? 1.4 : 1.0
+            }
+        }
+        return CGDisplayBounds(CGMainDisplayID()).width >= wide ? 1.4 : 1.0
+    }
+    let splitWidthMultiplier = splitMultiplier(for: winFrame)
     func direction(_ w: CGFloat, _ h: CGFloat) -> String {
         w >= h * splitWidthMultiplier ? "horizontal" : "vertical"
     }
@@ -524,7 +544,7 @@ case "split-hint":
         // been checked yet is how a close poisoned the whole burst.
         if s.w >= s.h * splitWidthMultiplier { w = s.w / 2; h = s.h } else { w = s.w; h = s.h / 2 }
         how = "predicted"
-    } else if state != nil, wid <= max(maxWid, state!.wid), let f = frame() {
+    } else if state != nil, wid <= max(maxWid, state!.wid), let f = winFrame {
         // an existing window refocused mid-burst: usually settled, and
         // checked below for when it is not
         (w, h) = (f.2, f.3)

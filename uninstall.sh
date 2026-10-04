@@ -265,14 +265,16 @@ fi
 # library by itself once nothing needs it). The list draws on /dev/tty, so
 # it works when the output goes to a file; with no terminal, all go.
 pick_keep() { # <label>... ; sets KEEP_IDX to the indexes kept
-  local n=$# cur=0 i key rest ans k r
+  local n=$# cur=0 i key rest ans k r quit=0
   local labels=("$@") sel=()
   for ((i = 0; i < n; i++)); do sel[i]=0; done
-  trap 'printf "\033[?25h" >/dev/tty; exit 130' INT
+  # Ctrl-C is not "abort the uninstall": it sets the flag the loop checks,
+  # so the packages are all kept and the rest of the uninstall still runs.
+  trap 'quit=1' INT
   printf '\033[?25l' >/dev/tty
   while :; do
     printf '\nomacosy installed these. Which would you like to KEEP?\n' >/dev/tty
-    printf '  up/down: move   space: keep or not   a: all   enter: done\n\n' >/dev/tty
+    printf '  up/down: move   space: keep or not   a: all   enter: done   ctrl-c: keep all\n\n' >/dev/tty
     for ((i = 0; i < n; i++)); do
       [ "${sel[i]}" = 1 ] && k='[x]' || k='[ ]'
       if [ "$i" = "$cur" ]; then
@@ -282,6 +284,7 @@ pick_keep() { # <label>... ; sets KEEP_IDX to the indexes kept
       fi
     done
     IFS= read -rsn1 key </dev/tty || key=""
+    if [ "$quit" = 1 ]; then break; fi
     case "$key" in
       $'\e') rest=""; IFS= read -rsn2 -t 1 rest </dev/tty || true
               case "$rest" in '[A') [ "$cur" -gt 0 ] && cur=$((cur - 1)) ;;
@@ -312,6 +315,15 @@ pick_keep() { # <label>... ; sets KEEP_IDX to the indexes kept
     # back to the top of the list to draw it again
     printf '\033[%dA\033[J' $((n + 4)) >/dev/tty
   done
+  # Ctrl-C reached here (the confirmed path returns from inside the case
+  # above). Keep every package and let the uninstall carry on instead of
+  # leaving it half-done.
+  printf '\033[?25h' >/dev/tty
+  KEEP_IDX=""
+  for ((i = 0; i < n; i++)); do KEEP_IDX="$KEEP_IDX $i "; done
+  printf 'Ctrl-C: keeping every package; carrying on with the rest of the uninstall.\n' >/dev/tty
+  trap - INT
+  return 0
 }
 
 if [ -f "$MANIFEST" ] && grep -qE '^brew-(formula|cask) ' "$MANIFEST"; then

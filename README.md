@@ -130,7 +130,7 @@ The fixes this build offers upstream, and their state today.
 | [#34](https://github.com/paulsp94/omacosy/pull/34) | MERGED | fix(wm-switch): a config swap reaches the daemon that reads it |
 | [#33](https://github.com/paulsp94/omacosy/pull/33) | MERGED | fix(gesture): the OmniWM swipe config points at another user's home |
 | [#32](https://github.com/paulsp94/omacosy/pull/32) | MERGED | fix(omniwm): tiled windows keep a margin from the screen edges |
-| [#31](https://github.com/paulsp94/omacosy/pull/31) | OPEN | feat(tiling): a workspace holding one window can fill the display |
+| [#31](https://github.com/paulsp94/omacosy/pull/31) | CLOSED | feat(tiling): a workspace holding one window can fill the display |
 | [#30](https://github.com/paulsp94/omacosy/pull/30) | OPEN | feat(bar): one command for autohide and the top gap it implies |
 | [#29](https://github.com/paulsp94/omacosy/pull/29) | OPEN | feat(bar): split the top edge between this bar and the native one |
 | [#28](https://github.com/paulsp94/omacosy/pull/28) | MERGED | fix(tiling): a new window chains only off a verified slot on its own workspace |

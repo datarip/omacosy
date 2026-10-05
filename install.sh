@@ -680,8 +680,10 @@ fi
 # the wordmark, tinted with the theme accent at runtime. Copied into state,
 # not linked: a launch from a TCC-protected clone must still find it.
 mkdir -p "$STATE_DIR/assets"
-cp "$REPO_DIR/helper/assets/omacosy-logo.png" "$STATE_DIR/assets/" 2>/dev/null || true
 cp "$REPO_DIR/helper/assets/omacosy-logo.svg" "$STATE_DIR/assets/" 2>/dev/null || true
+# the old flat pre-render is no longer shipped. Drop a stale copy so an
+# upgraded install cannot keep drawing the previous wordmark.
+rm -f "$STATE_DIR/assets/omacosy-logo.png"
 mark "dashboard-assets"
 # stable code identity so TCC grants survive rebuilds (skipped when no
 # signing identity works — then re-grant after each rebuild)

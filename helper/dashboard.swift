@@ -173,9 +173,10 @@ func logoFiles() -> [String] {
     bases.append(HOME + "/.local/share/omacosy/assets")
     var out: [String] = []
     for b in bases {
-        // PNG first: it carries the alpha mask CoreSVG cannot render from
-        // the SVG, so it tints correctly. The SVG stays as the vector source.
-        for name in ["omacosy-logo.png", "omacosy-logo.svg"] {
+        // SVG first: it is the source of the wordmark and the only file that
+        // carries the shaded strips. The PNG is a legacy pre-render that a
+        // stale copy in the state dir would otherwise shadow.
+        for name in ["omacosy-logo.svg", "omacosy-logo.png"] {
             let p = b + "/" + name
             if FileManager.default.fileExists(atPath: p) { out.append(p) }
         }
@@ -183,25 +184,89 @@ func logoFiles() -> [String] {
     return out
 }
 
-// the wordmark is drawn as a mask filled with the theme accent, so it
-// follows the theme like every other surface
-func tintedImage(_ image: NSImage, _ color: NSColor) -> NSImage {
-    let out = NSImage(size: image.size)
-    out.lockFocus()
-    let r = NSRect(origin: .zero, size: image.size)
-    image.draw(in: r)
-    color.set()
-    r.fill(using: .sourceIn)
-    out.unlockFocus()
+func mixColor(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
+    let x = a.usingColorSpace(.sRGB) ?? a, y = b.usingColorSpace(.sRGB) ?? b
+    return NSColor(srgbRed: x.redComponent + (y.redComponent - x.redComponent) * t,
+                   green: x.greenComponent + (y.greenComponent - x.greenComponent) * t,
+                   blue: x.blueComponent + (y.blueComponent - x.blueComponent) * t,
+                   alpha: 1)
+}
+
+// Omarchy's luminance ladder: one accent colour becomes five shades, "lit" being
+// the accent itself, crest and hover mixed toward white, mid and dim toward
+// black. The ratios are pulled in from Omarchy's own, which make the top band
+// glow and the bottom sink; and they are walked back smoothly as the card
+// brightens, so a mid-tone card gets neither a grey top nor a black bottom. A
+// light card lands on the gentlest ladder, where neither end reaches the card.
+func accentShades(_ accent: NSColor, cardL: CGFloat) -> [NSColor] {
+    let strong: [CGFloat] = [0.40, 0.19, 0, -0.21, -0.42]
+    let gentle: [CGFloat] = [0.12, 0.06, 0, -0.18, -0.36]
+    let t = min(1, max(0, (cardL - 0.10) / 0.35))
+    let step = zip(strong, gentle).map { $0 + ($1 - $0) * t }
+    return step.map { $0 >= 0 ? mixColor(accent, .white, $0) : mixColor(accent, .black, -$0) }
+}
+
+// crest, hover, lit, mid, dim sit at these brightnesses of the wordmark mask
+func shade(level: CGFloat, in shades: [NSColor]) -> NSColor {
+    let stop: [CGFloat] = [1, 0.75, 0.5, 0.25, 0]
+    if level >= 1 { return shades[0] }
+    if level <= 0 { return shades[4] }
+    for i in 0..<4 where level <= stop[i] && level >= stop[i + 1] {
+        return mixColor(shades[i], shades[i + 1], (stop[i] - level) / (stop[i] - stop[i + 1]))
+    }
+    return shades[2]
+}
+
+// the wordmark SVG is a neutral white-to-black ramp. Every pixel is mapped onto
+// the accent's shade ladder by its brightness, so each strip becomes a shade of
+// the theme colour and the top bands can be lighter than the accent. A flat fill
+// cannot do that, and neither can a multiply, which only ever darkens.
+func shadedImage(_ image: NSImage, _ color: NSColor, cardL: CGFloat) -> NSImage? {
+    let aspect = image.size.width / max(image.size.height, 1)
+    let h = 220
+    let w = max(1, Int((CGFloat(h) * aspect).rounded()))
+    let count = w * h * 4
+    let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
+    buf.initialize(repeating: 0, count: count)
+    defer { buf.deallocate() }
+    let cs = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: buf, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: w * 4, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+    image.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
+    NSGraphicsContext.restoreGraphicsState()
+    let shades = accentShades(color, cardL: cardL)
+    for i in stride(from: 0, to: count, by: 4) {
+        let a = CGFloat(buf[i + 3]) / 255
+        if a == 0 { continue }
+        let level = (0.299 * CGFloat(buf[i]) + 0.587 * CGFloat(buf[i + 1])
+                     + 0.114 * CGFloat(buf[i + 2])) / 255 / a
+        let c = shade(level: min(1, level), in: shades)
+        buf[i] = UInt8((c.redComponent * a * 255).rounded())
+        buf[i + 1] = UInt8((c.greenComponent * a * 255).rounded())
+        buf[i + 2] = UInt8((c.blueComponent * a * 255).rounded())
+    }
+    guard let provider = CGDataProvider(data: Data(bytes: buf, count: count) as CFData),
+          let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
+                           bytesPerRow: w * 4, space: cs,
+                           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                           provider: provider, decode: nil, shouldInterpolate: true,
+                           intent: .defaultIntent) else { return nil }
+    let out = NSImage(size: NSSize(width: w, height: h))
+    out.addRepresentation(NSBitmapImageRep(cgImage: cg))
     return out
 }
 
 func logoImage() -> NSImage? {
+    let card = palette.barBG.usingColorSpace(.sRGB) ?? .black
+    let cardL = 0.299 * card.redComponent + 0.587 * card.greenComponent + 0.114 * card.blueComponent
     for path in logoFiles() {
         guard let img = NSImage(contentsOfFile: path), img.size.width > 0 else { continue }
-        // a rep without alpha would tint into a solid block; skip it
-        guard img.representations.first?.hasAlpha ?? false else { continue }
-        return tintedImage(img, palette.accent)
+        // no alpha check: an SVG loads as a vector rep that reports no alpha
+        // even though it renders transparent, which rejected the shipped asset.
+        return shadedImage(img, palette.accent, cardL: cardL)
     }
     return nil
 }

@@ -28,6 +28,10 @@ LOG=/tmp/omacosy-ws-collapse.log
 mkdir -p "$STATE_DIR"
 log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
 
+# a refused move of a live window is retried on the next sync, up to this
+# many times, then dropped so it cannot retry for ever
+MAX_ATTEMPTS="${OMACOSY_RESTORE_MAX_ATTEMPTS:-3}"
+
 # a live OmniWM answers its socket in ~3 ms; pgrep -f scanned every
 # process for 31 ms per call, and a stale socket after a crash cannot
 # fool a real request the way a file test could
@@ -70,12 +74,6 @@ if [ -z "$CURRENT_WM" ]; then
   log "sync $WANT: no window manager answered in 30 s; map kept"
   exit 0
 fi
-
-# A record leaves the map only when its window went back or is gone: a
-# failed move of a live window is written back for the next restore.
-keep_if_live() { # <live ids> <wid> <gws>
-  if grep -qxF "$2" <<<"$1"; then printf '%s\t%s\n' "$2" "$3" >>"$MAP"; fi
-}
 
 if [ "$CURRENT_WM" = omniwm ]; then
   # Windows move BY ID (`window move-to-workspace`, OmniWM 0.6.5+) and
@@ -210,7 +208,7 @@ case "$([ "$WANT" = 1 ] && echo collapse || echo restore)" in
       ti=$((ti + 1))
       for wid in $WINS; do
         aerospace move-node-to-workspace --window-id "$wid" "$T" 2>/dev/null &&
-          printf '%s\t%s\n' "$wid" "$gws" >>"$MAP"
+          printf '%s\t%s\t%s\t%s\n' "$wid" "$gws" "$T" 0 >>"$MAP"
       done
       echo "$(date '+%F %T') collapsed $gws -> $T" >>/tmp/omacosy-ws-collapse.log
     done
@@ -227,15 +225,44 @@ case "$([ "$WANT" = 1 ] && echo collapse || echo restore)" in
     # let aerospace finish adopting the reattached monitor (its
     # force-assignment moves the guest workspaces back first)
     sleep 1
-    LIVE="$(aerospace list-windows --all --format '%{window-id}' 2>/dev/null)"
-    while IFS=$'\t' read -r wid gws _; do
+    # Same three verdicts as the OmniWM branch: gone dropped, moved-by-you
+    # left alone, still-where-the-fold-put-it moved back; a move refused for
+    # a live window is kept up to MAX_ATTEMPTS, then dropped.
+    if ! WHERE="$(aerospace list-windows --all --format '%{window-id}|%{workspace}' 2>/dev/null)"; then
+      log "sync $WANT: no window list from AeroSpace, map kept"
+      mv "$MAP.run" "$MAP" 2>/dev/null
+      exit 1
+    fi
+    : >"$MAP.next"
+    while IFS=$'\t' read -r wid gws target attempts; do
       [ -n "$wid" ] && [ -n "$gws" ] || continue
+      cur="$(printf '%s\n' "$WHERE" | awk -F'|' -v id="$wid" '$1 == id { print $2; exit }')"
+      if [ -z "$cur" ]; then
+        log "restore: $wid closed since the fold"
+        continue
+      fi
+      if [ -n "$target" ]; then
+        moved=0; [ "$cur" = "$target" ] || moved=1
+      else
+        moved=1; case "$cur" in [1-9]) moved=0 ;; esac
+      fi
+      if [ "$moved" = 1 ]; then
+        log "restore: $wid moved by you since the fold, left alone"
+        continue
+      fi
       if aerospace move-node-to-workspace --window-id "$wid" "$gws" 2>/dev/null; then
         echo "$(date '+%F %T') restored $wid -> $gws" >>/tmp/omacosy-ws-collapse.log
       else
-        keep_if_live "$LIVE" "$wid" "$gws"
+        tries=$(( ${attempts:-0} + 1 ))
+        if [ "$tries" -ge "$MAX_ATTEMPTS" ]; then
+          log "restore: $wid -> $gws refused $tries times, giving up"
+        else
+          printf '%s\t%s\t%s\t%s\n' "$wid" "$gws" "$target" "$tries" >>"$MAP.next"
+          log "restore: $wid -> $gws refused, kept for the next sync ($tries/$MAX_ATTEMPTS)"
+        fi
       fi
     done <"$MAP.run"
+    mv "$MAP.next" "$MAP"
     rm -f "$MAP.run"
     : > /tmp/omacosy-bar-moved
     ;;

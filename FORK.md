@@ -32,6 +32,7 @@ requests are where they can become everyone's. See
 | Overview | the overview follows a theme or wallpaper change, open or closed, and shows the desktop's wallpaper | `helper/overview.swift` |
 | Gestures | the OmniWM swipe config no longer points at another user's home | `config/gesture/` |
 | Gestures | the trackpad arms at once when OmniWM is the manager | `helper/gesture/` |
+| Gestures | the four-finger swipe finds OmniWM's IPC socket after 0.7.5 moved it | `helper/gesture/omniwm.c` |
 | Undock | the fold map survives an OmniWM restart, so folded windows still return to their workspace | `bin/omacosy-ws-collapse` |
 | Undock | the restore never drops a live window's record when no window manager answers | `bin/omacosy-ws-collapse` |
 | Install | a failed or interrupted install no longer leaves the OmniWM command chords wiped: they are restored right after Karabiner is reset | `install.sh` |

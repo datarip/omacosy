@@ -113,10 +113,25 @@ final class Omni {
     // would hang a notification handler on the main thread.
     private let streaming: Bool
 
+    // OmniWM 0.7.5 moved its IPC socket from ~/Library/Caches to
+    // ~/Library/Application Support; prefer the current location and fall
+    // back to the legacy one when only it exists (OmniWM <= 0.7.4).
+    // OMNIWM_SOCKET overrides both, matching helper/gesture/omniwm.c.
+    private static func defaultSocketPath() -> String {
+        let home = NSHomeDirectory()
+        let current = "\(home)/Library/Application Support/com.barut.OmniWM/ipc.sock"
+        let legacy = "\(home)/Library/Caches/com.barut.OmniWM/ipc.sock"
+        if !FileManager.default.fileExists(atPath: current),
+           FileManager.default.fileExists(atPath: legacy) {
+            return legacy
+        }
+        return current
+    }
+
     init(streaming: Bool = false) {
         self.streaming = streaming
         path = ProcessInfo.processInfo.environment["OMNIWM_SOCKET"]
-            ?? "\(NSHomeDirectory())/Library/Caches/com.barut.OmniWM/ipc.sock"
+            ?? Self.defaultSocketPath()
     }
 
     private func openSocket() -> Bool {

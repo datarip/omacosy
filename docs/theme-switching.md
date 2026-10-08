@@ -180,6 +180,12 @@ is crisp.
   a session follows the live picture, but the picture stored for the next boot
   is not updated by this fallback; only Apple fixing the API restores that
   half.
+- **Locking during the change can be black for a moment.** Until macOS has
+  painted the real picture, the lock screen shows that slot, not the overlay
+  (`loginwindow` is protected), and the outgoing picture may already be gone.
+  It clears on its own. Removing it would mean applying the real wallpaper
+  before the overlay appears — the ~4.5 s delay the overlay exists to hide — so
+  it is accepted.
 - The **terminal and its apps** are told at the same moment as the bar and the
   ring, but they are separate programs that must rewrite their configs and
   reload, so they settle about a second later.

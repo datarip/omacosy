@@ -253,7 +253,7 @@ fi
 
 # theme-set / theme-next out of ~/.local/bin — only when they are OUR
 # symlinks (a user's own script of the same name survives)
-for t in theme-set theme-next theme-bg-next omacosy-theme-switch omacosy-custom-theme omacosy-auto-theme omacosy-term-sync omacosy-derive omacosy-appearance omacosy-ws omacosy-toggle omacosy-focus-guard omacosy-ws-collapse omacosy-float omacosy-cycle omacosy-update omacosy-spawn omacosy-layout omacosy-finder-window omacosy-solo-fullscreen omacosy-fullscreen omacosy-bar-autohide omacosy-wm-switch omacosy-karabiner-omniwm \
+for t in theme-set theme-next theme-bg-next omacosy-theme-switch omacosy-custom-theme omacosy-auto-theme omacosy-term-sync omacosy-derive omacosy-themecore omacosy-appearance omacosy-ws omacosy-toggle omacosy-focus-guard omacosy-ws-collapse omacosy-float omacosy-cycle omacosy-update omacosy-spawn omacosy-layout omacosy-finder-window omacosy-solo-fullscreen omacosy-fullscreen omacosy-bar-autohide omacosy-wm-switch omacosy-karabiner-omniwm \
          omacosy-settings omacosy-ws-prune omacosy-window-corners omacosy-spawn-cmd omacosy-harvest-zshrc omacosy-browser omacosy-open; do
   target="$(readlink "$HOME/.local/bin/$t" 2>/dev/null || true)"
   case "$target" in *omacosy*) rm -f "$HOME/.local/bin/$t" ;; esac

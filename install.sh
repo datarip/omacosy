@@ -562,6 +562,13 @@ if [ ! -x "$HOME/.local/bin/omacosy-derive" ] || [ "$REPO_DIR/helper/derive.swif
   swiftc -O -o "$HOME/.local/bin/omacosy-derive" "$REPO_DIR/helper/derive.swift"
 fi
 
+# Theme Studio engine: colour maths now, theme records and library next. Same
+# single-source rule as derive above; no UI, no permissions.
+if [ ! -x "$HOME/.local/bin/omacosy-themecore" ] || [ "$REPO_DIR/helper/themecore.swift" -nt "$HOME/.local/bin/omacosy-themecore" ]; then
+  log "Building omacosy-themecore"
+  swiftc -O -o "$HOME/.local/bin/omacosy-themecore" "$REPO_DIR/helper/themecore.swift"
+fi
+
 # terminal palette for the theme on screen. Used only while
 # `omacosy-auto-theme on`; building it costs nothing otherwise.
 if [ ! -x "$HOME/.local/bin/omacosy-term-palette" ] || [ "$REPO_DIR/helper/term-palette.swift" -nt "$HOME/.local/bin/omacosy-term-palette" ]; then

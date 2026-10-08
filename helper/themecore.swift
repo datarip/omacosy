@@ -22,6 +22,12 @@
 //   omacosy-themecore wallpaper info <path> [--json]
 //   omacosy-themecore wallpaper rename <old> <new> [--json]
 //   omacosy-themecore wallpaper trash <path> [--json]
+//   omacosy-themecore palette extract <image> [--mode ID] [--light] [--json]
+//   omacosy-themecore palette generate --colors CSV [--counts CSV|--weights CSV]
+//                                           [--mode ID] [--light] [--normalize] [--json]
+//   omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]   (test support)
+//   omacosy-themecore palette analyze <op> ...                                   (test support)
+//   omacosy-themecore image info <path> [--json]
 //   omacosy-themecore version [--json]
 //
 // Every verb takes --json and then prints one JSON value on stdout.
@@ -753,6 +759,1080 @@ enum Modes {
                        group: "practical",
                        description: "Two hues only at varying lightness"),
     ]
+}
+
+// MARK: - Extraction (Phase 2)
+
+// Ported from Aether (https://github.com/omacom/aether)
+// Copyright (c) Bjarne Overli — MIT License
+//
+// The extraction pipeline: sample an image's pixels in sRGB, quantize them
+// in OKLab with median cut, and generate the 16-colour palette. The
+// constants and the arithmetic are ported line for line, because the
+// recorded fixtures are Aether's own output. Phase 2a builds the sampler,
+// median cut and the chromatic / monochrome / monochromatic generators;
+// the other 20 generators and Magic arrive in Phase 2b.
+
+enum Extract {
+    static let ansiPaletteSize = 16
+    static let imageScaleSize = 400
+    static let minPixelsToSample = 1000
+    static let maxPixelsToSample = 50000
+    static let dominantColorsToExtract = 48
+
+    // Vivid pixels get duplicated in the median-cut pool so a small saturated
+    // accent is not drowned out by a large muted background.
+    static let chromaBoostThreshold = 0.04
+    static let chromaBoostMaxExtra = 3
+    static let chromaBoostRampChroma = 0.16
+
+    static let backgroundDominanceWeight = 0.6
+
+    static let monochromeChromaThreshold = 0.04
+    static let monochromeImageThreshold = 0.6
+    static let hueClusterMagnitudeThreshold = 0.85
+    static let monoChromaticCoverageFloor = 0.06
+
+    static let autoMonoArcDeg = 46.0
+    static let explicitMonoArcDeg = 28.0
+    static let monoChromaFactorFloor = 0.4
+    static let monoAccentMinLStep = 0.072
+
+    static let accentChromaFloor = 0.05
+    static let accentChromaCeil = 0.16
+    static let nearAchromaticChroma = 0.03
+    static let accentMinDeltaE = 0.05
+    static let accentSupportChroma = 0.04
+    static let hueSupportTol = 30.0
+    static let minAccentHueSupport = 0.025
+
+    static let minMeaningfulTintChroma = 0.008
+
+    static let minChromaForAnsiMatch = 0.035
+    static let lowChromaThreshold = 0.05
+    static let idealChromaMin = 0.06
+    static let idealChromaMax = 0.20
+    static let tooDarkLightness = 0.25
+    static let tooBrightLightness = 0.87
+
+    static let minContrastRatio = 4.5
+    static let minHighContrastRatio = 7.0
+    static let minCommentContrast = 3.0
+    static let minFgBgContrast = 7.0
+
+    static let brightColorLightnessBoost = 0.12
+    static let brightColorSaturationBoost = 1.1
+
+    static let darkColorThreshold = 0.50
+
+    static let oklchAnsiHues: [Double] = [29.2, 139.1, 111.3, 266.7, 326.4, 194.8]
+    static let canonicalLightnessOrder: [Int] = [3, 0, 4, 1, 5, 2]
+
+    // Aether's DecodeImage guard, kept so extraction refuses the same inputs.
+    static let maxImageDimension = 16384
+    static let maxImagePixels = 40_000_000
+}
+
+func clampF(_ v: Double, _ lo: Double, _ hi: Double) -> Double { max(lo, min(hi, v)) }
+
+// MARK: Median cut in OKLab
+
+struct OKLabBucket {
+    var colors: [OKLab]
+    var ranges: [[Double]]
+
+    init(_ colors: [OKLab]) {
+        self.colors = colors
+        self.ranges = [[0, 0], [0, 0], [0, 0]]
+        computeRanges()
+    }
+
+    mutating func computeRanges() {
+        guard let first = colors.first else {
+            ranges = [[0, 0], [0, 0], [0, 0]]
+            return
+        }
+        ranges = [[first.l, first.l], [first.a, first.a], [first.b, first.b]]
+        for c in colors {
+            let vals = [c.l, c.a, c.b]
+            for ch in 0..<3 {
+                if vals[ch] < ranges[ch][0] { ranges[ch][0] = vals[ch] }
+                if vals[ch] > ranges[ch][1] { ranges[ch][1] = vals[ch] }
+            }
+        }
+    }
+
+    func axisRange(_ axis: Int) -> Double { ranges[axis][1] - ranges[axis][0] }
+
+    // Lightness is weighted slightly higher: it is the most perceptible axis.
+    func longestAxis() -> Int {
+        let lRange = axisRange(0) * 1.2
+        let aRange = axisRange(1)
+        let bRange = axisRange(2)
+        if lRange >= aRange && lRange >= bRange { return 0 }
+        if aRange >= bRange { return 1 }
+        return 2
+    }
+
+    func split() -> (OKLabBucket, OKLabBucket) {
+        let axis = longestAxis()
+        let sorted = colors.sorted { oklabAxisValue($0, axis) < oklabAxisValue($1, axis) }
+        let mid = sorted.count / 2
+        return (OKLabBucket(Array(sorted[0..<mid])), OKLabBucket(Array(sorted[mid...])))
+    }
+
+    func averageColor() -> (OKLab, Int) {
+        let count = colors.count
+        if count == 0 { return (OKLab(l: 0, a: 0, b: 0), 0) }
+        var lSum = 0.0, aSum = 0.0, bSum = 0.0
+        for c in colors {
+            lSum += c.l
+            aSum += c.a
+            bSum += c.b
+        }
+        let n = Double(count)
+        return (OKLab(l: lSum / n, a: aSum / n, b: bSum / n), count)
+    }
+
+    func volume() -> Double { axisRange(0) * axisRange(1) * axisRange(2) * Double(colors.count) }
+}
+
+func oklabAxisValue(_ c: OKLab, _ axis: Int) -> Double {
+    switch axis {
+    case 0: return c.l
+    case 1: return c.a
+    default: return c.b
+    }
+}
+
+struct ColorEntry { var hex: String; var count: Int }
+
+// Median-cut quantization in OKLab. Returns hex colours with their pixel
+// counts; callers sort by count descending.
+func medianCut(_ colors: [OKLab], count numColors: Int) -> [ColorEntry] {
+    if colors.isEmpty { return [] }
+    if colors.count <= numColors { return deduplicateOKLabColors(colors) }
+
+    var buckets: [OKLabBucket] = [OKLabBucket(colors)]
+    while buckets.count < numColors {
+        let splitIdx = findLargestSplittableOKLabBucket(buckets)
+        if splitIdx == -1 { break }
+        let (left, right) = buckets[splitIdx].split()
+        buckets.remove(at: splitIdx)
+        buckets.insert(contentsOf: [left, right], at: splitIdx)
+    }
+
+    var result: [ColorEntry] = []
+    for bucket in buckets {
+        let (avg, count) = bucket.averageColor()
+        if count > 0 {
+            result.append(ColorEntry(hex: ColorMath.hex(fromOKLab: avg), count: count))
+        }
+    }
+    return result
+}
+
+func boostChromaticPixels(_ pixels: [OKLab]) -> [OKLab] {
+    var result: [OKLab] = []
+    result.reserveCapacity(pixels.count * 2)
+    for px in pixels {
+        result.append(px)
+        let chroma = (px.a * px.a + px.b * px.b).squareRoot()
+        if chroma <= Extract.chromaBoostThreshold { continue }
+        let t = (chroma - Extract.chromaBoostThreshold) / Extract.chromaBoostRampChroma
+        let extra = max(1, min(Int((t * Double(Extract.chromaBoostMaxExtra)).rounded()), Extract.chromaBoostMaxExtra))
+        for _ in 0..<extra { result.append(px) }
+    }
+    return result
+}
+
+func deduplicateOKLabColors(_ colors: [OKLab]) -> [ColorEntry] {
+    var unique: [ColorEntry] = []
+    let threshold = 0.01
+    for c in colors {
+        var isDuplicate = false
+        for u in unique {
+            let uLab = ColorMath.oklab(fromHex: u.hex)
+            if ColorMath.oklabDistance(c, uLab) < threshold {
+                isDuplicate = true
+                break
+            }
+        }
+        if !isDuplicate {
+            unique.append(ColorEntry(hex: ColorMath.hex(fromOKLab: c), count: 1))
+        }
+    }
+    return unique
+}
+
+func findLargestSplittableOKLabBucket(_ buckets: [OKLabBucket]) -> Int {
+    var maxVolume = 0.0
+    var maxIndex = -1
+    for (i, bucket) in buckets.enumerated() {
+        if bucket.colors.count > 1 {
+            let volume = bucket.volume()
+            if volume > maxVolume {
+                maxVolume = volume
+                maxIndex = i
+            }
+        }
+    }
+    return maxIndex
+}
+
+// MARK: Dominant colours
+
+func extractDominantColorsFromPixels(_ pixels: [RGB], count: Int) throws -> (colors: [String], counts: [Int]) {
+    if pixels.count < Extract.minPixelsToSample / 10 {
+        throw ThemeError(message: "not enough pixels to extract colors")
+    }
+    let labs = pixels.map { ColorMath.oklab(fromSRGB: $0) }
+    let boosted = boostChromaticPixels(labs)
+    let quantized = medianCut(boosted, count: count)
+    if quantized.isEmpty {
+        throw ThemeError(message: "no colors extracted from image")
+    }
+    let sorted = quantized.sorted { $0.count > $1.count }
+    return (sorted.map { $0.hex.uppercased() }, sorted.map { $0.count })
+}
+
+func extractDominantColors(url: URL, count: Int) throws -> (colors: [String], counts: [Int]) {
+    let sample = try sampleImage(url: url)
+    return try extractDominantColorsFromPixels(sample.pixels, count: count)
+}
+
+// MARK: Analysis
+
+func isDarkColor(_ hex: String) -> Bool {
+    ColorMath.oklab(fromHex: hex).l < Extract.darkColorThreshold
+}
+
+func hueDistance(_ hue1: Double, _ hue2: Double) -> Double {
+    var diff = abs(hue1 - hue2)
+    if diff > 180 { diff = 360 - diff }
+    return diff
+}
+
+func isMonochromeImage(_ colors: [String]) -> Bool {
+    if colors.isEmpty { return false }
+
+    var lowChromaCount = 0
+    var sinSum = 0.0, cosSum = 0.0
+    var chromaticCount = 0
+
+    for c in colors {
+        let lch = ColorMath.oklch(fromHex: c)
+        if lch.c < Extract.monochromeChromaThreshold {
+            lowChromaCount += 1
+            continue
+        }
+        let rad = lch.h * .pi / 180
+        sinSum += sin(rad)
+        cosSum += cos(rad)
+        chromaticCount += 1
+    }
+
+    if Double(lowChromaCount) / Double(colors.count) > Extract.monochromeImageThreshold {
+        return true
+    }
+
+    if chromaticCount >= 4 {
+        let mag = (sinSum * sinSum + cosSum * cosSum).squareRoot() / Double(chromaticCount)
+        if mag > Extract.hueClusterMagnitudeThreshold { return true }
+    }
+    return false
+}
+
+func isMonochromeWeighted(_ colors: [String], _ weights: [Double]?) -> Bool {
+    if colors.isEmpty { return false }
+    guard let weights else { return isMonochromeImage(colors) }
+
+    var achroW = 0.0, chromaW = 0.0, sinSum = 0.0, cosSum = 0.0
+    for (i, c) in colors.enumerated() {
+        let w = i < weights.count ? weights[i] : 0.0
+        let lch = ColorMath.oklch(fromHex: c)
+        if lch.c < Extract.monochromeChromaThreshold {
+            achroW += w
+            continue
+        }
+        chromaW += w
+        let rad = lch.h * .pi / 180
+        sinSum += sin(rad) * w
+        cosSum += cos(rad) * w
+    }
+
+    let total = achroW + chromaW
+    if total == 0 { return false }
+    if chromaW / total < Extract.monoChromaticCoverageFloor { return true }
+    let mag = (sinSum * sinSum + cosSum * cosSum).squareRoot() / chromaW
+    return mag > Extract.hueClusterMagnitudeThreshold
+}
+
+func findColorByPerceptualLightness(_ colors: [String], _ weights: [Double]?, _ findLightest: Bool,
+                                    _ excludeIndices: Set<Int>?) -> (String, Int) {
+    var bestIndex = 0
+    var bestScore = -Double.infinity
+
+    for i in 0..<colors.count {
+        if let excludeIndices, excludeIndices.contains(i) { continue }
+
+        let lab = ColorMath.oklab(fromHex: colors[i])
+        var score = lab.l
+        if !findLightest { score = 1 - lab.l }
+        if let weights, i < weights.count {
+            score += Extract.backgroundDominanceWeight * weights[i]
+        }
+
+        if score > bestScore {
+            bestScore = score
+            bestIndex = i
+        }
+    }
+    return (colors[bestIndex], bestIndex)
+}
+
+func findBackgroundColor(_ colors: [String], _ weights: [Double]?, _ lightMode: Bool) -> (String, Int) {
+    findColorByPerceptualLightness(colors, weights, lightMode, nil)
+}
+
+func findForegroundColor(_ colors: [String], _ weights: [Double]?, _ lightMode: Bool,
+                         _ bgColor: String, _ usedIndices: Set<Int>) -> (String, Int) {
+    let (fgColor, fgIndex) = findColorByPerceptualLightness(colors, weights, !lightMode, usedIndices)
+
+    let contrast = ColorMath.contrastRatio(bgColor, fgColor)
+    if contrast >= Extract.minFgBgContrast { return (fgColor, fgIndex) }
+
+    var candidates: [(index: Int, contrast: Double)] = []
+    for (i, c) in colors.enumerated() {
+        if usedIndices.contains(i) { continue }
+        let cr = ColorMath.contrastRatio(bgColor, c)
+        if cr > contrast { candidates.append((i, cr)) }
+    }
+    candidates.sort { $0.contrast > $1.contrast }
+
+    if let best = candidates.first, best.contrast >= Extract.minContrastRatio {
+        return (colors[best.index], best.index)
+    }
+
+    // Synthesize at the contrast extreme; -1 means "not a pool colour".
+    var fgLab = ColorMath.oklab(fromHex: fgColor)
+    let bgLab = ColorMath.oklab(fromHex: bgColor)
+    fgLab.l = bgLab.l < 0.5 ? 0.97 : 0.05
+    return (ColorMath.hex(fromOKLab: fgLab), -1)
+}
+
+func calculateColorScore(_ lch: OKLCH, _ targetHue: Double, _ lightMode: Bool) -> Double {
+    let hueScore = hueDistance(lch.h, targetHue) * 2.0
+
+    var chromaScore: Double
+    if lch.c < Extract.minChromaForAnsiMatch {
+        chromaScore = 80
+    } else if lch.c < Extract.lowChromaThreshold {
+        chromaScore = 40
+    } else if lch.c < Extract.idealChromaMin {
+        chromaScore = 15
+    } else if lch.c <= Extract.idealChromaMax {
+        chromaScore = 0
+    } else {
+        chromaScore = (lch.c - Extract.idealChromaMax) * 50
+    }
+
+    let idealL = lightMode ? 0.45 : 0.60
+
+    var lightnessScore: Double
+    if lch.l < Extract.tooDarkLightness {
+        lightnessScore = (Extract.tooDarkLightness - lch.l) * 200
+    } else if lch.l > Extract.tooBrightLightness {
+        lightnessScore = (lch.l - Extract.tooBrightLightness) * 150
+    } else {
+        lightnessScore = abs(lch.l - idealL) * 20
+    }
+
+    return hueScore + chromaScore + lightnessScore
+}
+
+func findBestColorMatch(_ targetHue: Double, _ colorPool: [String], _ usedIndices: Set<Int>, _ lightMode: Bool) -> Int {
+    var bestIndex = -1
+    var bestScore = Double.infinity
+
+    for i in 0..<colorPool.count {
+        if usedIndices.contains(i) { continue }
+        let lch = ColorMath.oklch(fromHex: colorPool[i])
+        let score = calculateColorScore(lch, targetHue, lightMode)
+        if score < bestScore {
+            bestScore = score
+            bestIndex = i
+        }
+    }
+
+    if bestIndex != -1 { return bestIndex }
+    return 0
+}
+
+func generateBrightVersion(_ hex: String) -> String {
+    let lab = ColorMath.oklab(fromHex: hex)
+    let lch = ColorMath.oklch(fromOKLab: lab)
+
+    if lab.l >= 0.78 {
+        let newL = min(0.94, lab.l + 0.04)
+        let newC = min(0.32, max(lch.c + 0.04, lch.c * 1.3))
+        return ColorMath.hex(fromOKLCH: OKLCH(l: newL, c: newC, h: lch.h))
+    }
+
+    let headroom = 0.92 - lab.l
+    let boost = max(0.04, min(Extract.brightColorLightnessBoost, headroom * 0.6))
+    let newL = min(0.92, lab.l + boost)
+    let newC = min(0.30, lch.c * Extract.brightColorSaturationBoost)
+
+    return ColorMath.hex(fromOKLCH: OKLCH(l: newL, c: newC, h: lch.h))
+}
+
+struct ColorLightnessInfo {
+    var color: String
+    var lightness: Double
+    var hue: Double
+}
+
+func sortColorsByLightness(_ colors: [String]) -> [ColorLightnessInfo] {
+    colors.map { c in
+        let lch = ColorMath.oklch(fromHex: c)
+        return ColorLightnessInfo(color: c, lightness: lch.l, hue: lch.h)
+    }.sorted { $0.lightness < $1.lightness }
+}
+
+struct AnsiAssignment {
+    var poolIndex: Int
+    var score: Double
+}
+
+// Global greedy matching: at each step the best (ANSI slot, colour) pair is
+// taken, so earlier slots cannot steal a later slot's best match.
+func findOptimalAnsiAssignment(_ colorPool: [String], _ usedIndices: Set<Int>, _ lightMode: Bool) -> [AnsiAssignment?] {
+    var allScores: [[(poolIndex: Int, score: Double)]] = []
+    for a in 0..<6 {
+        let targetHue = Extract.oklchAnsiHues[a]
+        var candidates: [(poolIndex: Int, score: Double)] = []
+        for (i, c) in colorPool.enumerated() {
+            if usedIndices.contains(i) {
+                candidates.append((i, .infinity))
+            } else {
+                let lch = ColorMath.oklch(fromHex: c)
+                candidates.append((i, calculateColorScore(lch, targetHue, lightMode)))
+            }
+        }
+        candidates.sort { $0.score < $1.score }
+        allScores.append(candidates)
+    }
+
+    var assignments: [AnsiAssignment?] = Array(repeating: nil, count: 6)
+    var assignedPoolIndices = usedIndices
+
+    for _ in 0..<6 {
+        var bestAnsi = -1
+        var bestPoolIndex = -1
+        var bestScore = Double.infinity
+
+        for a in 0..<6 {
+            if assignments[a] != nil { continue }
+            for cand in allScores[a] {
+                if assignedPoolIndices.contains(cand.poolIndex) { continue }
+                if cand.score < bestScore {
+                    bestScore = cand.score
+                    bestAnsi = a
+                    bestPoolIndex = cand.poolIndex
+                }
+                break // the list is sorted: the first unassigned is the best
+            }
+        }
+
+        if bestAnsi == -1 { break }
+        assignments[bestAnsi] = AnsiAssignment(poolIndex: bestPoolIndex, score: bestScore)
+        assignedPoolIndices.insert(bestPoolIndex)
+    }
+
+    return assignments
+}
+
+// MARK: Chromatic palette
+
+func extractChromaticHues(_ dominantColors: [String], _ weights: [Double]?, _ lightMode: Bool) -> [String] {
+    let topCount = min(12, dominantColors.count)
+    let topColors = Array(dominantColors[0..<topCount])
+    let topWeights: [Double]? = weights.map { Array($0.prefix(topCount)) }
+
+    var (bgColor, bgIndex) = findBackgroundColor(topColors, topWeights, lightMode)
+    bgColor = synthesizeBgIfTooMid(bgColor, lightMode)
+    var usedIndices: Set<Int> = [bgIndex]
+
+    let (fgColor, fgIndex) = findForegroundColor(dominantColors, weights, lightMode, bgColor, usedIndices)
+    if fgIndex >= 0 { usedIndices.insert(fgIndex) }
+
+    var palette = Array(repeating: "", count: 16)
+    palette[0] = bgColor
+    palette[7] = fgColor
+
+    // Callers guarantee at least 8 dominant colours and at most 2 pre-claimed,
+    // so all six ANSI slots are filled; a direct caller with fewer gets a clear
+    // error instead of a crash.
+    let assignments = findOptimalAnsiAssignment(dominantColors, usedIndices, lightMode)
+    for i in 0..<6 {
+        guard let assignment = assignments[i] else {
+            fail("the chromatic generator needs at least 8 dominant colours")
+        }
+        palette[i + 1] = dominantColors[assignment.poolIndex]
+        usedIndices.insert(assignment.poolIndex)
+    }
+
+    return palette
+}
+
+func synthesizeBgIfTooMid(_ bgColor: String, _ lightMode: Bool) -> String {
+    let lch = ColorMath.oklch(fromHex: bgColor)
+    if lightMode {
+        if lch.l >= 0.85 { return bgColor }
+        return ColorMath.hex(fromOKLCH: OKLCH(l: 0.94, c: min(lch.c, 0.04), h: lch.h))
+    }
+    if lch.l <= 0.20 { return bgColor }
+    return ColorMath.hex(fromOKLCH: OKLCH(l: 0.12, c: min(lch.c, 0.05), h: lch.h))
+}
+
+struct HueCluster {
+    var hue: Double
+    var coverage: Double
+}
+
+// A coverage-weighted hue histogram: the hue bands real chromatic pixels
+// actually occupy, at least MinAccentHueSupport of the frame each. Accents
+// are only allowed to use these hues.
+func supportedHueClusters(_ dominantColors: [String], _ weights: [Double]?) -> [HueCluster] {
+    let bins = 12 // 30-degree bands
+    var binW = Array(repeating: 0.0, count: bins)
+    var binSin = Array(repeating: 0.0, count: bins)
+    var binCos = Array(repeating: 0.0, count: bins)
+
+    for (k, c) in dominantColors.enumerated() {
+        let lch = ColorMath.oklch(fromHex: c)
+        if lch.c < Extract.accentSupportChroma { continue }
+        var w = 1.0 / Double(dominantColors.count)
+        if let weights, k < weights.count { w = weights[k] }
+        var b = Int(lch.h / 30) % bins
+        if b < 0 { b += bins }
+        let rad = lch.h * .pi / 180
+        binW[b] += w
+        binSin[b] += sin(rad) * w
+        binCos[b] += cos(rad) * w
+    }
+
+    var out: [HueCluster] = []
+    for b in 0..<bins where binW[b] >= Extract.minAccentHueSupport {
+        let raw = atan2(binSin[b], binCos[b]) * 180 / .pi + 360
+        out.append(HueCluster(hue: raw.truncatingRemainder(dividingBy: 360), coverage: binW[b]))
+    }
+    return out
+}
+
+func nearestClusterHue(_ target: Double, _ clusters: [HueCluster]) -> (Double, Bool) {
+    var best = Double.infinity
+    var bestHue = 0.0
+    for c in clusters {
+        let d = hueDistance(target, c.hue)
+        if d < best {
+            best = d
+            bestHue = c.hue
+        }
+    }
+    return (bestHue, !clusters.isEmpty)
+}
+
+func normalizeChromaticAccents(_ p: inout [String], _ dominantColors: [String], _ weights: [Double]?, _ lightMode: Bool) {
+    let target = clampF(salientChroma(dominantColors) * 0.85, Extract.accentChromaFloor, Extract.accentChromaCeil)
+    let clusters = supportedHueClusters(dominantColors, weights)
+
+    for i in 1...6 {
+        var lch = ColorMath.oklch(fromHex: p[i])
+        let grayPick = lch.c < Extract.nearAchromaticChroma
+        var supported = false
+        for cl in clusters {
+            if hueDistance(lch.h, cl.hue) <= Extract.hueSupportTol {
+                supported = true
+                break
+            }
+        }
+        if grayPick || !supported {
+            let (h, ok) = nearestClusterHue(Extract.oklchAnsiHues[i - 1], clusters)
+            if ok {
+                lch.h = h
+            } else if grayPick {
+                lch.c = 0
+            }
+        }
+        if lch.c > 0 && lch.c < target { lch.c = target }
+        p[i] = ColorMath.hex(fromOKLCH: lch)
+    }
+
+    // Lightness-only distinctness pass.
+    for i in 1...6 {
+        for j in stride(from: i + 1, through: 6, by: 1) {
+            if ColorMath.oklabDistance(ColorMath.oklab(fromHex: p[i]), ColorMath.oklab(fromHex: p[j])) < Extract.accentMinDeltaE {
+                var lch = ColorMath.oklch(fromHex: p[j])
+                if lightMode {
+                    lch.l = clampF(lch.l - 0.10, 0.20, 0.85)
+                } else {
+                    lch.l = clampF(lch.l + 0.10, 0.30, 0.92)
+                }
+                p[j] = ColorMath.hex(fromOKLCH: lch)
+            }
+        }
+    }
+}
+
+func generateCommentColor(_ bgColor: String) -> String {
+    let bgLab = ColorMath.oklab(fromHex: bgColor)
+    let bgLch = ColorMath.oklch(fromOKLab: bgLab)
+
+    var targetL: Double
+    if bgLab.l < 0.5 {
+        targetL = min(1.0, bgLab.l + 0.30)
+    } else {
+        targetL = max(0.0, bgLab.l - 0.30)
+    }
+
+    let commentChroma = 0.01
+    var commentColor = ColorMath.hex(fromOKLCH: OKLCH(l: targetL, c: commentChroma, h: bgLch.h))
+
+    var contrast = ColorMath.contrastRatio(bgColor, commentColor)
+    if contrast < Extract.minCommentContrast {
+        let step = 0.05
+        if bgLab.l < 0.5 {
+            while targetL < 0.95 && contrast < Extract.minCommentContrast {
+                targetL += step
+                commentColor = ColorMath.hex(fromOKLCH: OKLCH(l: targetL, c: commentChroma, h: bgLch.h))
+                contrast = ColorMath.contrastRatio(bgColor, commentColor)
+            }
+        } else {
+            while targetL > 0.05 && contrast < Extract.minCommentContrast {
+                targetL -= step
+                commentColor = ColorMath.hex(fromOKLCH: OKLCH(l: targetL, c: commentChroma, h: bgLch.h))
+                contrast = ColorMath.contrastRatio(bgColor, commentColor)
+            }
+        }
+    }
+
+    return commentColor
+}
+
+func boostContrastAgainstBg(_ hex: String, _ bgColor: String, _ targetRatio: Double) -> String {
+    let lab = ColorMath.oklab(fromHex: hex)
+    var lch = ColorMath.oklch(fromOKLab: lab)
+    let bgLab = ColorMath.oklab(fromHex: bgColor)
+
+    let step = 0.03
+    if bgLab.l < 0.5 {
+        while lch.l < 0.95 {
+            lch.l += step
+            let candidate = ColorMath.hex(fromOKLCH: lch)
+            if ColorMath.contrastRatio(bgColor, candidate) >= targetRatio { return candidate }
+        }
+    } else {
+        while lch.l > 0.05 {
+            lch.l -= step
+            let candidate = ColorMath.hex(fromOKLCH: lch)
+            if ColorMath.contrastRatio(bgColor, candidate) >= targetRatio { return candidate }
+        }
+    }
+
+    return ColorMath.hex(fromOKLCH: lch)
+}
+
+func generateChromaticPalette(_ dominantColors: [String], _ weights: [Double]?, _ lightMode: Bool) -> [String] {
+    var palette = extractChromaticHues(dominantColors, weights, lightMode)
+    normalizeChromaticAccents(&palette, dominantColors, weights, lightMode)
+    finalizePalette(&palette)
+    return palette
+}
+
+// MARK: Monochrome / monochromatic palettes
+
+func synthesizeMonoBgIfMuddy(_ bgColor: String, _ lightMode: Bool) -> String {
+    let lch = ColorMath.oklch(fromHex: bgColor)
+    if lightMode {
+        if lch.l >= 0.75 { return bgColor }
+        return ColorMath.hex(fromOKLCH: OKLCH(l: 0.94, c: min(lch.c, 0.04), h: lch.h))
+    }
+    if lch.l <= 0.35 { return bgColor }
+    return ColorMath.hex(fromOKLCH: OKLCH(l: 0.14, c: min(lch.c, 0.06), h: lch.h))
+}
+
+func detectMonochromeTint(_ colors: [String]) -> (hue: Double, hasTint: Bool, tintStrength: Double) {
+    if colors.isEmpty { return (0, false, 0) }
+    var sinSum = 0.0, cosSum = 0.0, chromaSum = 0.0
+
+    for c in colors {
+        let lch = ColorMath.oklch(fromHex: c)
+        if lch.c > 0.005 {
+            let weight = lch.c
+            let rad = lch.h * .pi / 180
+            sinSum += sin(rad) * weight
+            cosSum += cos(rad) * weight
+            chromaSum += weight
+        }
+    }
+
+    let avgChroma = chromaSum / Double(colors.count)
+    if avgChroma < Extract.minMeaningfulTintChroma { return (0, false, 0) }
+
+    let meanSin = sinSum / chromaSum
+    let meanCos = cosSum / chromaSum
+    let raw = atan2(meanSin, meanCos) * 180 / .pi + 360
+    let avgHue = raw.truncatingRemainder(dividingBy: 360)
+    let concentration = (meanSin * meanSin + meanCos * meanCos).squareRoot()
+    return (avgHue, true, concentration * avgChroma)
+}
+
+func salientChroma(_ colors: [String]) -> Double {
+    if colors.isEmpty { return 0 }
+    var chromas = colors.map { ColorMath.oklch(fromHex: $0).c }
+    chromas.sort()
+    let idx = Int((0.9 * Double(chromas.count - 1)).rounded())
+    return chromas[idx]
+}
+
+func mean6(_ v: [Double]) -> Double { v.reduce(0, +) / 6 }
+
+func monoChromaFactor(_ dominantColors: [String], _ refMean: Double) -> Double {
+    clampF(salientChroma(dominantColors) / refMean, Extract.monoChromaFactorFloor, 1.0)
+}
+
+func foldHueIntoArc(_ canonicalHue: Double, _ baseHue: Double, _ arcDeg: Double) -> Double {
+    let d = (canonicalHue - baseHue + 540).truncatingRemainder(dividingBy: 360) - 180
+    return (baseHue + (d / 180.0) * arcDeg + 360).truncatingRemainder(dividingBy: 360)
+}
+
+func monoAccentRamp(_ bg: String, _ lightMode: Bool) -> [Double] {
+    var start: Double, step: Double
+    if lightMode {
+        let hi = neutralReadableL(bg, true, Extract.minContrastRatio) - 0.02
+        start = hi
+        step = -max(Extract.monoAccentMinLStep, (hi - 0.16) / 5.0)
+    } else {
+        let lo = neutralReadableL(bg, false, Extract.minContrastRatio) + 0.02
+        start = lo
+        step = max(Extract.monoAccentMinLStep, (0.92 - lo) / 5.0)
+    }
+
+    var slotL = Array(repeating: 0.0, count: 6)
+    for (pos, slot) in Extract.canonicalLightnessOrder.enumerated() {
+        slotL[slot] = clampF(start + step * Double(pos), 0.06, 0.97)
+    }
+    return slotL
+}
+
+func ensureMonoHeadroom(_ bg: String, _ lightMode: Bool) -> String {
+    let lch = ColorMath.oklch(fromHex: bg)
+    if lightMode {
+        if neutralReadableL(bg, true, Extract.minContrastRatio) < 0.42 {
+            return ColorMath.hex(fromOKLCH: OKLCH(l: 0.95, c: min(lch.c, 0.04), h: lch.h))
+        }
+        return bg
+    }
+    if neutralReadableL(bg, false, Extract.minContrastRatio) > 0.60 {
+        return ColorMath.hex(fromOKLCH: OKLCH(l: 0.13, c: min(lch.c, 0.06), h: lch.h))
+    }
+    return bg
+}
+
+func generateMonochromePalette(_ grayColors: [String], _ lightMode: Bool) -> [String] {
+    let (tintHue, hasTint, _) = detectMonochromeTint(grayColors)
+    if !hasTint {
+        return generateGrayscaleMonochromaticPalette(grayColors, lightMode)
+    }
+    return generateTintedMonochromaticPalette(grayColors, lightMode, tintHue, Extract.autoMonoArcDeg)
+}
+
+func generateMonochromaticPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let (tintHue, hasTint, _) = detectMonochromeTint(dominantColors)
+    if !hasTint {
+        return generateGrayscaleMonochromaticPalette(dominantColors, lightMode)
+    }
+    return generateTintedMonochromaticPalette(dominantColors, lightMode, tintHue, Extract.explicitMonoArcDeg)
+}
+
+func neutralReadableL(_ bg: String, _ lightMode: Bool, _ ratio: Double) -> Double {
+    func gray(_ l: Double) -> String { ColorMath.hex(fromOKLCH: OKLCH(l: l, c: 0, h: 0)) }
+    if !lightMode {
+        var l = 0.20
+        while l <= 0.95 {
+            if ColorMath.contrastRatio(bg, gray(l)) >= ratio { return l }
+            l += 0.01
+        }
+        return 0.55
+    }
+    var l = 0.80
+    while l >= 0.05 {
+        if ColorMath.contrastRatio(bg, gray(l)) >= ratio { return l }
+        l -= 0.01
+    }
+    return 0.45
+}
+
+func generateGrayscaleMonochromaticPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let sortedByLightness = sortColorsByLightness(dominantColors)
+    let darkest = sortedByLightness[0]
+    let lightest = sortedByLightness[sortedByLightness.count - 1]
+
+    var palette = Array(repeating: "", count: 16)
+
+    if lightMode {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: max(0.94, lightest.lightness), c: 0, h: 0))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: min(0.22, darkest.lightness), c: 0, h: 0))
+    } else {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: min(0.14, darkest.lightness), c: 0, h: 0))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: max(0.88, lightest.lightness), c: 0, h: 0))
+    }
+
+    palette[0] = ensureMonoHeadroom(palette[0], lightMode)
+    let slotL = monoAccentRamp(palette[0], lightMode)
+    for i in 0..<6 {
+        palette[i + 1] = ColorMath.hex(fromOKLCH: OKLCH(l: slotL[i], c: 0, h: 0))
+    }
+
+    palette[8] = generateCommentColor(palette[0])
+
+    let bump = lightMode ? -0.06 : 0.06
+    for i in 0..<6 {
+        let l = max(0.05, min(0.97, slotL[i] + bump))
+        palette[i + 9] = ColorMath.hex(fromOKLCH: OKLCH(l: l, c: 0, h: 0))
+    }
+
+    palette[15] = lightMode
+        ? ColorMath.hex(fromOKLCH: OKLCH(l: 0.04, c: 0, h: 0))
+        : ColorMath.hex(fromOKLCH: OKLCH(l: 0.99, c: 0, h: 0))
+
+    return palette
+}
+
+func generateTintedMonochromaticPalette(_ dominantColors: [String], _ lightMode: Bool,
+                                        _ baseHue: Double, _ arcDeg: Double) -> [String] {
+    let sortedByLightness = sortColorsByLightness(dominantColors)
+    let darkest = sortedByLightness[0]
+    let lightest = sortedByLightness[sortedByLightness.count - 1]
+
+    var palette = Array(repeating: "", count: 16)
+
+    if lightMode {
+        palette[0] = synthesizeMonoBgIfMuddy(lightest.color, lightMode)
+        palette[7] = darkest.color
+    } else {
+        palette[0] = synthesizeMonoBgIfMuddy(darkest.color, lightMode)
+        palette[7] = lightest.color
+    }
+    palette[0] = ensureMonoHeadroom(palette[0], lightMode)
+
+    if ColorMath.contrastRatio(palette[0], palette[7]) < Extract.minFgBgContrast {
+        let bgLab = ColorMath.oklab(fromHex: palette[0])
+        var fgLab = ColorMath.oklab(fromHex: palette[7])
+        fgLab.l = bgLab.l < 0.5 ? 0.97 : 0.05
+        palette[7] = ColorMath.hex(fromOKLab: fgLab)
+    }
+
+    let chromaLevels: [Double] = [0.09, 0.11, 0.13, 0.10, 0.12, 0.14]
+    let brightChromaLevels: [Double] = [0.11, 0.14, 0.16, 0.12, 0.15, 0.17]
+    let chromaFactor = monoChromaFactor(dominantColors, mean6(chromaLevels))
+
+    let slotL = monoAccentRamp(palette[0], lightMode)
+
+    for i in 0..<6 {
+        let hue = foldHueIntoArc(Extract.oklchAnsiHues[i], baseHue, arcDeg)
+        palette[i + 1] = ColorMath.hex(fromOKLCH: OKLCH(l: slotL[i], c: chromaLevels[i] * chromaFactor, h: hue))
+    }
+
+    palette[8] = generateCommentColor(palette[0])
+
+    let brightAdj = lightMode ? -0.07 : 0.07
+    for i in 0..<6 {
+        let hue = foldHueIntoArc(Extract.oklchAnsiHues[i], baseHue, arcDeg)
+        let l = clampF(slotL[i] + brightAdj, 0.18, 0.96)
+        palette[i + 9] = ColorMath.hex(fromOKLCH: OKLCH(l: l, c: brightChromaLevels[i] * chromaFactor, h: hue))
+    }
+
+    palette[15] = lightMode
+        ? ColorMath.hex(fromOKLCH: OKLCH(l: 0.08, c: 0.03, h: baseHue))
+        : ColorMath.hex(fromOKLCH: OKLCH(l: 0.97, c: 0.015, h: baseHue))
+
+    return palette
+}
+
+// MARK: Finalize and dispatch
+
+// Slots 0, 7 and 1-6 must be set; 8, 9-14 and 15 are derived here, and AA
+// contrast is enforced for the ANSI colours.
+func finalizePalette(_ p: inout [String]) {
+    p[8] = generateCommentColor(p[0])
+    for i in 1...6 {
+        p[i + 8] = generateBrightVersion(p[i])
+    }
+    p[15] = generateBrightVersion(p[7])
+
+    for i in 1...6 {
+        if ColorMath.contrastRatio(p[0], p[i]) < Extract.minContrastRatio {
+            p[i] = boostContrastAgainstBg(p[i], p[0], Extract.minContrastRatio)
+            p[i + 8] = generateBrightVersion(p[i])
+        }
+    }
+}
+
+func normalizeBrightness(_ palette: [String]) -> [String] {
+    var palette = palette
+    for i in 1...6 {
+        if ColorMath.contrastRatio(palette[0], palette[i]) < Extract.minContrastRatio {
+            palette[i] = boostContrastAgainstBg(palette[i], palette[0], Extract.minContrastRatio)
+            palette[i + 8] = generateBrightVersion(palette[i])
+        }
+    }
+    return palette
+}
+
+func normalizeCounts(_ counts: [Int]) -> [Double]? {
+    let total = counts.reduce(0, +)
+    if total == 0 { return nil }
+    return counts.map { Double($0) / Double(total) }
+}
+
+// generatorName maps a generator the fixtures and the editor reach directly:
+// `chromatic` and `monochrome` are Aether's two auto-routed generators, not
+// entries of the 23-mode list.
+func generatePaletteByMode(_ dominantColors: [String], _ weights: [Double]?, _ lightMode: Bool, _ mode: String) -> [String] {
+    switch mode {
+    case "monochromatic":
+        return generateMonochromaticPalette(dominantColors, lightMode)
+    case "chromatic":
+        return generateChromaticPalette(dominantColors, weights, lightMode)
+    case "monochrome":
+        return generateMonochromePalette(dominantColors, lightMode)
+    case "normal":
+        if isMonochromeWeighted(dominantColors, weights) {
+            return generateMonochromePalette(dominantColors, lightMode)
+        }
+        return generateChromaticPalette(dominantColors, weights, lightMode)
+    default:
+        fail("extraction mode \"\(mode)\" is not built yet (Phase 2b)")
+    }
+}
+
+func extractionModeExists(_ mode: String) -> Bool {
+    mode == "magic" || mode == "chromatic" || mode == "monochrome" || Modes.all.contains { $0.value == mode }
+}
+
+func extractColors(url: URL, light: Bool, mode: String) throws -> [String] {
+    let dominant = try extractDominantColors(url: url, count: Extract.dominantColorsToExtract)
+    if dominant.colors.count < 8 {
+        throw ThemeError(message: "not enough colors extracted from image")
+    }
+    let weights = normalizeCounts(dominant.counts)
+    let palette = generatePaletteByMode(dominant.colors, weights, light, mode)
+    return normalizeBrightness(palette)
+}
+
+// MARK: Pixel sampling
+
+struct SampleResult {
+    var format: String
+    var width: Int
+    var height: Int
+    var hasAlpha: Bool
+    var pixels: [RGB]
+    var mean: (r: Double, g: Double, b: Double)
+    var digest: String
+}
+
+// Decode the image, scale it to 400 px on the long side, and take every
+// step-th pixel (up to 50 000). The bitmap is an sRGB context, so an embedded
+// profile is converted, never read raw — the 22/255 trap of derive.swift.
+// Unlike Aether's Go CatmullRom downscale, ImageIO's resampler differs by a
+// few thousandths of a byte; exact fixtures are recorded on images whose long
+// side is already 400, where both pipelines are identity up to the pixel.
+func sampleImage(url: URL) throws -> SampleResult {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = props[kCGImagePropertyPixelWidth] as? Int,
+          let height = props[kCGImagePropertyPixelHeight] as? Int else {
+        throw ThemeError(message: "cannot read image: \(url.path)")
+    }
+    guard width > 0, height > 0,
+          width <= Extract.maxImageDimension, height <= Extract.maxImageDimension,
+          width * height <= Extract.maxImagePixels else {
+        throw ThemeError(message: "unsafe image dimensions \(width)x\(height)")
+    }
+    guard let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw ThemeError(message: "cannot decode image: \(url.path)")
+    }
+
+    let dw: Int, dh: Int
+    if width >= height {
+        dw = Extract.imageScaleSize
+        dh = max(1, Int((Double(height) * Double(Extract.imageScaleSize) / Double(width)).rounded()))
+    } else {
+        dh = Extract.imageScaleSize
+        dw = max(1, Int((Double(width) * Double(Extract.imageScaleSize) / Double(height)).rounded()))
+    }
+
+    let bytesPerRow = dw * 4
+    let byteCount = bytesPerRow * dh
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
+    defer { buffer.deallocate() }
+    buffer.initialize(repeating: 0, count: byteCount)
+
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(data: buffer, width: dw, height: dh, bitsPerComponent: 8,
+                                  bytesPerRow: bytesPerRow, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+        throw ThemeError(message: "cannot create the sRGB bitmap for \(url.path)")
+    }
+    context.interpolationQuality = .high
+    context.draw(cg, in: CGRect(x: 0, y: 0, width: dw, height: dh))
+
+    let step = max(1, Int(floor(Double(dw * dh) / Double(Extract.maxPixelsToSample))))
+    var pixels: [RGB] = []
+    pixels.reserveCapacity(min(dw * dh, Extract.maxPixelsToSample))
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(pixels.capacity * 3)
+    var rSum = 0.0, gSum = 0.0, bSum = 0.0
+
+    for y in stride(from: 0, to: dh, by: step) {
+        for x in stride(from: 0, to: dw, by: step) {
+            let offset = y * bytesPerRow + x * 4
+            let alpha = buffer[offset + 3]
+            if alpha < 128 { continue }
+            let r: Double, g: Double, b: Double
+            if alpha == 255 {
+                r = Double(buffer[offset])
+                g = Double(buffer[offset + 1])
+                b = Double(buffer[offset + 2])
+            } else {
+                let a = Double(alpha) / 255.0
+                r = min(255, (Double(buffer[offset]) / a).rounded())
+                g = min(255, (Double(buffer[offset + 1]) / a).rounded())
+                b = min(255, (Double(buffer[offset + 2]) / a).rounded())
+            }
+            pixels.append(RGB(r: r, g: g, b: b))
+            bytes.append(UInt8(r))
+            bytes.append(UInt8(g))
+            bytes.append(UInt8(b))
+            rSum += r
+            gSum += g
+            bSum += b
+        }
+    }
+
+    let n = Double(pixels.count)
+    let mean: (r: Double, g: Double, b: Double) = n > 0 ? (rSum / n, gSum / n, bSum / n) : (0, 0, 0)
+    let digest = SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+    let type = CGImageSourceGetType(source) as String? ?? ""
+    let format = type.components(separatedBy: ".").last?.uppercased() ?? "UNKNOWN"
+    let hasAlpha = (props[kCGImagePropertyHasAlpha] as? Bool) ?? false
+
+    return SampleResult(format: format, width: width, height: height, hasAlpha: hasAlpha,
+                        pixels: pixels, mean: mean, digest: digest)
 }
 
 // MARK: - Theme records (schema v1)
@@ -1660,7 +2740,7 @@ func themeError(_ error: Error) -> Never {
 
 // MARK: - CLI
 
-let themecoreVersion = "0.2.0"
+let themecoreVersion = "0.3.0"
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write("omacosy-themecore: \(message)\n".data(using: .utf8)!)
@@ -1697,6 +2777,12 @@ func usage() -> Never {
            omacosy-themecore wallpaper info <path> [--json]
            omacosy-themecore wallpaper rename <old> <new> [--json]
            omacosy-themecore wallpaper trash <path> [--json]
+           omacosy-themecore palette extract <image> [--mode ID] [--light] [--json]
+           omacosy-themecore palette generate --colors CSV [--counts CSV|--weights CSV]
+                                           [--mode ID] [--light] [--normalize] [--json]
+           omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]
+           omacosy-themecore palette analyze <op> ...
+           omacosy-themecore image info <path> [--json]
            omacosy-themecore version [--json]
 
     """.data(using: .utf8)!)
@@ -1749,6 +2835,30 @@ func hexArgument(_ label: String) -> String {
     guard let raw = args.first else { usage() }
     args.removeFirst()
     return normalizedHex(raw)
+}
+
+func hexListArgument(_ raw: String) -> [String] {
+    let parts = raw.split(separator: ",").map { normalizedHex(String($0)) }
+    if parts.isEmpty { fail("empty colour list") }
+    return parts
+}
+
+func intListArgument(_ raw: String) -> [Int] {
+    let parts = raw.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+    if parts.isEmpty { fail("empty number list") }
+    return parts.map {
+        guard let n = Int($0) else { fail("not a whole number: \($0)") }
+        return n
+    }
+}
+
+func doubleListArgument(_ raw: String) -> [Double] {
+    let parts = raw.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+    if parts.isEmpty { fail("empty number list") }
+    return parts.map {
+        guard let n = Double($0) else { fail("not a number: \($0)") }
+        return n
+    }
 }
 
 func noExtraArguments() {
@@ -2315,6 +3425,254 @@ case "wallpaper":
             print("moved to Trash: \((outcome.path as NSString).lastPathComponent) -> \(outcome.trashedTo)")
             if outcome.derivedRemoved { print("removed the derived theme cache") }
             if outcome.indexCleared { print("cleared custom-index") }
+            exit(0)
+        } catch { themeError(error) }
+
+    default:
+        usage()
+    }
+
+case "palette":
+    guard let sub = args.first else { usage() }
+    args.removeFirst()
+
+    switch sub {
+    case "extract":
+        do {
+            guard let raw = args.first else { throw ThemeError(message: "palette extract needs an image path") }
+            args.removeFirst()
+            let mode = takeFlag("--mode") ?? "normal"
+            let light = takeBool("--light")
+            noExtraArguments()
+            guard extractionModeExists(mode) else { fail("unknown extraction mode: \(mode)") }
+            let path = Wallpapers.resolved(raw)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                throw ThemeError(message: "no such image: \(path)")
+            }
+            let palette = try extractColors(url: URL(fileURLWithPath: path), light: light, mode: mode)
+            if jsonOut {
+                printJSON(["path": path, "mode": mode, "light": light, "colors": palette])
+            }
+            palette.forEach { print($0) }
+            exit(0)
+        } catch { themeError(error) }
+
+    case "generate":
+        guard let colorsRaw = takeFlag("--colors") else {
+            fail("palette generate needs --colors (#rrggbb,#rrggbb,...)")
+        }
+        let colors = hexListArgument(colorsRaw)
+        let mode = takeFlag("--mode") ?? "normal"
+        let light = takeBool("--light")
+        let normalize = takeBool("--normalize")
+        let countsRaw = takeFlag("--counts")
+        let weightsRaw = takeFlag("--weights")
+        noExtraArguments()
+        guard extractionModeExists(mode) else { fail("unknown extraction mode: \(mode)") }
+        if countsRaw != nil && weightsRaw != nil {
+            fail("--counts and --weights cannot be combined")
+        }
+        var weights: [Double]? = nil
+        if let countsRaw {
+            let counts = intListArgument(countsRaw)
+            guard counts.count == colors.count else { fail("--counts must have one value per colour") }
+            weights = normalizeCounts(counts)
+        } else if let weightsRaw {
+            let values = doubleListArgument(weightsRaw)
+            guard values.count == colors.count else { fail("--weights must have one value per colour") }
+            weights = values
+        }
+        if mode == "chromatic" && colors.count < 8 {
+            fail("chromatic needs at least 8 dominant colours")
+        }
+        var palette = generatePaletteByMode(colors, weights, light, mode)
+        if normalize { palette = normalizeBrightness(palette) }
+        if jsonOut {
+            printJSON(["mode": mode, "light": light, "colors": palette])
+        }
+        palette.forEach { print($0) }
+        exit(0)
+
+    case "quantize":
+        var count = Extract.dominantColorsToExtract
+        if let raw = takeFlag("--count") {
+            guard let n = Int(raw), n >= 1, n <= 256 else {
+                fail("--count must be a whole number between 1 and 256")
+            }
+            count = n
+        }
+        let fileRaw = takeFlag("--pixels-file")
+        let inlineRaw = takeFlag("--pixels")
+        noExtraArguments()
+        let hexes: [String]
+        if let fileRaw {
+            if fileRaw == "-" {
+                let data = FileHandle.standardInput.readDataToEndOfFile()
+                hexes = String(data: data, encoding: .utf8)?
+                    .split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " || $0 == "\t" })
+                    .map(String.init) ?? []
+            } else {
+                let path = Wallpapers.resolved(fileRaw)
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    fail("cannot read \(path)")
+                }
+                hexes = text.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " || $0 == "\t" })
+                    .map(String.init)
+            }
+        } else if let inlineRaw {
+            hexes = inlineRaw.split(separator: ",").map(String.init)
+        } else {
+            fail("palette quantize needs --pixels-file or --pixels")
+        }
+        let pixels = hexes.map { raw -> RGB in
+            guard let v = ColorMath.hexUInt32(raw) else { fail("invalid pixel colour \"\(raw)\"") }
+            return RGB(r: Double((v >> 16) & 0xff), g: Double((v >> 8) & 0xff), b: Double(v & 0xff))
+        }
+        do {
+            let (colors, counts) = try extractDominantColorsFromPixels(pixels, count: count)
+            if jsonOut {
+                printJSON(zip(colors, counts).map { ["hex": $0.0, "count": $0.1] })
+            }
+            for (hex, n) in zip(colors, counts) { print("\(hex) \(n)") }
+            exit(0)
+        } catch { themeError(error) }
+
+    case "analyze":
+        guard let op = args.first else { fail("palette analyze needs an operation") }
+        args.removeFirst()
+        switch op {
+        case "dark":
+            let hex = hexArgument("hex")
+            noExtraArguments()
+            print(isDarkColor(hex) ? "true" : "false")
+
+        case "hue-distance":
+            guard args.count >= 2, let a = Double(args[0]), let b = Double(args[1]) else {
+                fail("hue-distance needs two numbers")
+            }
+            args.removeFirst(2)
+            noExtraArguments()
+            print(String(format: "%.9f", hueDistance(a, b)))
+
+        case "is-monochrome":
+            guard let raw = args.first else { fail("is-monochrome needs a colour list") }
+            args.removeFirst()
+            noExtraArguments()
+            print(isMonochromeImage(hexListArgument(raw)) ? "true" : "false")
+
+        case "weighted":
+            guard args.count >= 2 else { fail("weighted needs colours and counts") }
+            let colors = hexListArgument(args[0])
+            let counts = args[1] == "-" ? nil : intListArgument(args[1])
+            args.removeFirst(2)
+            noExtraArguments()
+            print(isMonochromeWeighted(colors, counts.flatMap(normalizeCounts)) ? "true" : "false")
+
+        case "tint":
+            guard let raw = args.first else { fail("tint needs a colour list") }
+            args.removeFirst()
+            noExtraArguments()
+            let (hue, hasTint, strength) = detectMonochromeTint(hexListArgument(raw))
+            print(String(format: "%@ %.9f %.9f", hasTint ? "true" : "false", hue, strength))
+
+        case "salient":
+            guard let raw = args.first else { fail("salient needs a colour list") }
+            args.removeFirst()
+            noExtraArguments()
+            print(String(format: "%.9f", salientChroma(hexListArgument(raw))))
+
+        case "bright":
+            let hex = hexArgument("hex")
+            noExtraArguments()
+            print(generateBrightVersion(hex))
+
+        case "sort":
+            guard let raw = args.first else { fail("sort needs a colour list") }
+            args.removeFirst()
+            noExtraArguments()
+            print(sortColorsByLightness(hexListArgument(raw)).map { $0.color }.joined(separator: ","))
+
+        case "bg":
+            guard args.count >= 3 else { fail("bg needs colours, counts and dark|light") }
+            let colors = hexListArgument(args[0])
+            let weights = args[1] == "-" ? nil : normalizeCounts(intListArgument(args[1]))
+            guard args[2] == "dark" || args[2] == "light" else { fail("bg needs dark|light") }
+            let light = args[2] == "light"
+            args.removeFirst(3)
+            noExtraArguments()
+            let (hex, index) = findBackgroundColor(colors, weights, light)
+            print("\(hex) \(index)")
+
+        case "fg":
+            guard args.count >= 4 else { fail("fg needs colours, counts, dark|light and a background hex") }
+            let colors = hexListArgument(args[0])
+            let weights = args[1] == "-" ? nil : normalizeCounts(intListArgument(args[1]))
+            guard args[2] == "dark" || args[2] == "light" else { fail("fg needs dark|light") }
+            let light = args[2] == "light"
+            let bg = normalizedHex(args[3])
+            args.removeFirst(4)
+            noExtraArguments()
+            let (hex, index) = findForegroundColor(colors, weights, light, bg, [])
+            print("\(hex) \(index)")
+
+        case "assign":
+            guard args.count >= 3 else { fail("assign needs colours, counts and dark|light") }
+            let colors = hexListArgument(args[0])
+            guard args[2] == "dark" || args[2] == "light" else { fail("assign needs dark|light") }
+            let light = args[2] == "light"
+            args.removeFirst(3)
+            noExtraArguments()
+            let assignments = findOptimalAnsiAssignment(colors, [], light)
+            print(assignments.map { $0.map { String($0.poolIndex) } ?? "-1" }.joined(separator: ","))
+
+        default:
+            usage()
+        }
+        exit(0)
+
+    default:
+        usage()
+    }
+
+case "image":
+    guard let sub = args.first else { usage() }
+    args.removeFirst()
+
+    switch sub {
+    case "info":
+        do {
+            guard let raw = args.first else { throw ThemeError(message: "image info needs a path") }
+            args.removeFirst()
+            noExtraArguments()
+            let path = Wallpapers.resolved(raw)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                throw ThemeError(message: "no such image: \(path)")
+            }
+            let sample = try sampleImage(url: URL(fileURLWithPath: path))
+            let meanR = (sample.mean.r * 100).rounded() / 100
+            let meanG = (sample.mean.g * 100).rounded() / 100
+            let meanB = (sample.mean.b * 100).rounded() / 100
+            if jsonOut {
+                printJSON([
+                    "path": path,
+                    "name": (path as NSString).lastPathComponent,
+                    "format": sample.format,
+                    "width": sample.width,
+                    "height": sample.height,
+                    "hasAlpha": sample.hasAlpha,
+                    "sampledPixels": sample.pixels.count,
+                    "sampleMean": [sample.mean.r, sample.mean.g, sample.mean.b],
+                    "sampleDigest": sample.digest,
+                ])
+            }
+            print(path)
+            print("  format      \(sample.format)")
+            print("  pixels      \(sample.width)x\(sample.height)")
+            print("  alpha       \(sample.hasAlpha ? "yes" : "no")")
+            print("  samples     \(sample.pixels.count)")
+            print("  sample mean \(meanR), \(meanG), \(meanB)")
             exit(0)
         } catch { themeError(error) }
 

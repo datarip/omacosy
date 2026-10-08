@@ -22,11 +22,16 @@
 //   omacosy-themecore wallpaper info <path> [--json]
 //   omacosy-themecore wallpaper rename <old> <new> [--json]
 //   omacosy-themecore wallpaper trash <path> [--json]
-//   omacosy-themecore palette extract <image> [--mode ID] [--light] [--json]
+//   omacosy-themecore palette extract <image> [--mode ID] [--light] [--no-cache] [--json]
 //   omacosy-themecore palette generate --colors CSV [--counts CSV|--weights CSV]
 //                                           [--mode ID] [--light] [--normalize] [--json]
+//   omacosy-themecore palette magic <image> [--roles] [--no-cache] [--json]
+//   omacosy-themecore palette roles --colors CSV [--accent HEX] [--json]
+//   omacosy-themecore palette roles --image PATH [--mode ID] [--light] [--json]
+//   omacosy-themecore palette suggest-mode <image> [--json]
 //   omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]   (test support)
 //   omacosy-themecore palette analyze <op> ...                                   (test support)
+//   omacosy-themecore wallpaper scan [--dir DIR] [--json]                        (test support)
 //   omacosy-themecore image info <path> [--json]
 //   omacosy-themecore version [--json]
 //
@@ -44,6 +49,7 @@
 //
 // Ported from Aether (https://github.com/omacom/aether)
 // Copyright (c) Bjarne Overli — MIT License
+import AppKit
 import CryptoKit
 import Foundation
 import ImageIO
@@ -769,9 +775,9 @@ enum Modes {
 // The extraction pipeline: sample an image's pixels in sRGB, quantize them
 // in OKLab with median cut, and generate the 16-colour palette. The
 // constants and the arithmetic are ported line for line, because the
-// recorded fixtures are Aether's own output. Phase 2a builds the sampler,
-// median cut and the chromatic / monochrome / monochromatic generators;
-// the other 20 generators and Magic arrive in Phase 2b.
+// recorded fixtures are Aether's own output. All 23 Aether generators are
+// here; Magic, the Omacosy bridge, is ported from derive.swift and
+// term-palette.swift below.
 
 enum Extract {
     static let ansiPaletteSize = 16
@@ -1662,6 +1668,464 @@ func generateTintedMonochromaticPalette(_ dominantColors: [String], _ lightMode:
     return palette
 }
 
+// MARK: Style, scheme, mood and practical generators (Phase 2b)
+
+// `oklchRule` shapes an OKLCH colour into a mode-specific output, one rule
+// per ladder. Ported from Aether's palette_modes.go.
+struct OklchRule {
+    let light: (OKLCH) -> OKLCH
+    let dark: (OKLCH) -> OKLCH
+
+    func apply(_ lch: OKLCH, _ lightMode: Bool) -> OKLCH {
+        lightMode ? light(lch) : dark(lch)
+    }
+}
+
+// pullHueToward shifts a hue toward target by strength along the shorter arc.
+func pullHueToward(_ hue: Double, _ target: Double, _ strength: Double) -> Double {
+    let diff = (target - hue + 540).truncatingRemainder(dividingBy: 360) - 180
+    return (hue + diff * strength + 360).truncatingRemainder(dividingBy: 360)
+}
+
+// The hue of the image's most chromatic dominant colour: the colour identity
+// the schemes and moods pivot on. Achromatic images report 0 (red).
+func extractDominantHue(_ dominantColors: [String]) -> Double {
+    var hue = 0.0
+    var bestChroma = 0.0
+    for c in dominantColors {
+        let lch = ColorMath.oklch(fromHex: c)
+        if lch.c > bestChroma {
+            bestChroma = lch.c
+            hue = lch.h
+        }
+    }
+    return hue
+}
+
+// transformChromaticPalette extracts image-derived hues and rebuilds the
+// palette in OKLCH through the three rules, then derives slots 8/9-15 and
+// enforces AA contrast against the transformed background.
+func transformChromaticPalette(_ dominantColors: [String], _ lightMode: Bool,
+                               _ bgRule: OklchRule, _ fgRule: OklchRule, _ ansiRule: OklchRule,
+                               _ ansiLightnessOffsets: [Double]) -> [String] {
+    let base = extractChromaticHues(dominantColors, nil, lightMode)
+
+    var result = Array(repeating: "", count: 16)
+    result[0] = ColorMath.hex(fromOKLCH: bgRule.apply(ColorMath.oklch(fromHex: base[0]), lightMode))
+    result[7] = ColorMath.hex(fromOKLCH: fgRule.apply(ColorMath.oklch(fromHex: base[7]), lightMode))
+
+    for i in 0..<6 {
+        var shaped = ansiRule.apply(ColorMath.oklch(fromHex: base[i + 1]), lightMode)
+        shaped.l = clampF(shaped.l + ansiLightnessOffsets[i], 0.05, 0.95)
+        result[i + 1] = ColorMath.hex(fromOKLCH: shaped)
+    }
+
+    finalizePalette(&result)
+    return result
+}
+
+func generatePastelPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let bgRule = OklchRule(
+        light: { OKLCH(l: 0.96, c: 0.012, h: $0.h) },
+        dark: { OKLCH(l: 0.20, c: 0.022, h: $0.h) })
+    let fgRule = OklchRule(
+        light: { OKLCH(l: 0.32, c: 0.05, h: $0.h) },
+        dark: { OKLCH(l: 0.85, c: 0.04, h: $0.h) })
+    let ansiRule = OklchRule(
+        light: { OKLCH(l: 0.55, c: clampF($0.c, 0.045, 0.07), h: $0.h) },
+        dark: { OKLCH(l: 0.78, c: clampF($0.c, 0.05, 0.075), h: $0.h) })
+    let stagger: [Double] = [-0.04, +0.02, +0.05, -0.03, -0.01, +0.03]
+    return transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, stagger)
+}
+
+func generateColorfulPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let bgRule = OklchRule(
+        light: { OKLCH(l: 0.97, c: 0.012, h: $0.h) },
+        dark: { OKLCH(l: 0.10, c: 0.022, h: $0.h) })
+    let fgRule = OklchRule(
+        light: { OKLCH(l: 0.18, c: 0.04, h: $0.h) },
+        dark: { OKLCH(l: 0.92, c: 0.03, h: $0.h) })
+    let ansiRule = OklchRule(
+        light: { OKLCH(l: 0.50, c: clampF(max($0.c, 0.14), 0.14, 0.20), h: $0.h) },
+        dark: { OKLCH(l: 0.65, c: clampF(max($0.c, 0.14), 0.14, 0.20), h: $0.h) })
+    let stagger: [Double] = [-0.05, +0.02, +0.06, -0.03, -0.02, +0.04]
+    return transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, stagger)
+}
+
+// Muted: low chroma, subdued, with a widened lightness stagger because the
+// slots cannot lean on chroma differences for distinguishability.
+func generateMutedPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let bgRule = OklchRule(
+        light: { OKLCH(l: 0.94, c: 0.010, h: $0.h) },
+        dark: { OKLCH(l: 0.16, c: 0.018, h: $0.h) })
+    let fgRule = OklchRule(
+        light: { OKLCH(l: 0.28, c: 0.045, h: $0.h) },
+        dark: { OKLCH(l: 0.84, c: 0.035, h: $0.h) })
+    let ansiRule = OklchRule(
+        light: { OKLCH(l: 0.48, c: clampF($0.c * 0.5, 0.035, 0.065), h: $0.h) },
+        dark: { OKLCH(l: 0.62, c: clampF($0.c * 0.5, 0.035, 0.065), h: $0.h) })
+    let stagger: [Double] = [-0.10, -0.04, +0.04, +0.10, -0.07, +0.07]
+    return transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, stagger)
+}
+
+func generateBrightPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let bgRule = OklchRule(
+        light: { OKLCH(l: 0.98, c: 0.010, h: $0.h) },
+        dark: { OKLCH(l: 0.10, c: 0.020, h: $0.h) })
+    let fgRule = OklchRule(
+        light: { OKLCH(l: 0.15, c: 0.04, h: $0.h) },
+        dark: { OKLCH(l: 0.92, c: 0.025, h: $0.h) })
+    let ansiRule = OklchRule(
+        light: { OKLCH(l: 0.42, c: clampF(max($0.c, 0.10), 0.10, 0.18), h: $0.h) },
+        dark: { OKLCH(l: 0.78, c: clampF(max($0.c, 0.10), 0.10, 0.18), h: $0.h) })
+    let stagger: [Double] = [-0.04, +0.01, +0.06, -0.03, -0.02, +0.03]
+    return transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, stagger)
+}
+
+// Material Design-inspired, HSL rather than OKLCH like the other modes: the
+// spec fixes the neutral bg/fg and an HSL accent contract, so porting this
+// to OKLCH would drift from the spec.
+func generateMaterialPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    var palette = Array(repeating: "", count: 16)
+    var usedIndices = Set<Int>()
+
+    palette[0] = lightMode ? "#fafafa" : "#121212"
+    palette[7] = lightMode ? "#212121" : "#ffffff"
+
+    for i in 0..<Extract.oklchAnsiHues.count {
+        let matchIndex = findBestColorMatch(Extract.oklchAnsiHues[i], dominantColors, usedIndices, lightMode)
+        let matchedColor = dominantColors[matchIndex]
+        let hsl = ColorMath.hsl(fromHex: matchedColor)
+
+        let refinedSaturation = max(hsl.s, 35)
+        let refinedLightness = lightMode ? max(35, min(60, hsl.l)) : max(45, min(70, hsl.l))
+
+        palette[i + 1] = ColorMath.hex(fromHSL: HSL(h: hsl.h, s: refinedSaturation, l: refinedLightness))
+        usedIndices.insert(matchIndex)
+    }
+
+    palette[8] = lightMode ? "#757575" : "#9e9e9e"
+
+    for i in 1...6 {
+        let hsl = ColorMath.hsl(fromHex: palette[i])
+        let brightSaturation = min(100, hsl.s + 8)
+        let brightLightness = lightMode ? max(30, hsl.l - 8) : min(75, hsl.l + 8)
+        palette[i + 8] = ColorMath.hex(fromHSL: HSL(h: hsl.h, s: brightSaturation, l: brightLightness))
+    }
+
+    palette[15] = lightMode ? "#000000" : "#ffffff"
+    return palette
+}
+
+// Analogous: ±30° around the dominant hue, lightness alternating between
+// dim and bright slots so six close hues stay distinguishable.
+func generateAnalogousPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let sortedByLightness = sortColorsByLightness(dominantColors)
+    let darkest = sortedByLightness[0]
+    let lightest = sortedByLightness[sortedByLightness.count - 1]
+
+    var palette = Array(repeating: "", count: 16)
+
+    if lightMode {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: max(0.92, lightest.lightness), c: 0.02, h: baseHue))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: min(0.28, darkest.lightness + 0.05), c: 0.04, h: baseHue))
+    } else {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: min(0.16, darkest.lightness), c: 0.03, h: baseHue))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: max(0.88, lightest.lightness - 0.05), c: 0.025, h: baseHue))
+    }
+
+    let analogousOffsets: [Double] = [-30, -18, -6, 6, 18, 30]
+    let chromaLevels: [Double] = [0.10, 0.13, 0.09, 0.14, 0.10, 0.12]
+    let lightnessStagger: [Double] = [-0.06, +0.04, -0.04, +0.06, -0.05, +0.05]
+    let lightnessBase = lightMode ? 0.50 : 0.62
+
+    for i in 0..<6 {
+        let hue = (baseHue + analogousOffsets[i] + 360).truncatingRemainder(dividingBy: 360)
+        let lightness = clampF(lightnessBase + lightnessStagger[i], 0.30, 0.85)
+        palette[i + 1] = ColorMath.hex(fromOKLCH: OKLCH(l: lightness, c: chromaLevels[i], h: hue))
+    }
+
+    palette[8] = generateCommentColor(palette[0])
+
+    for i in 0..<6 {
+        let hue = (baseHue + analogousOffsets[i] + 360).truncatingRemainder(dividingBy: 360)
+        var brightL = clampF(lightnessBase + lightnessStagger[i] + 0.10, 0.30, 0.92)
+        if lightMode { brightL = clampF(lightnessBase + lightnessStagger[i] - 0.10, 0.20, 0.70) }
+        palette[i + 9] = ColorMath.hex(fromOKLCH: OKLCH(l: brightL, c: chromaLevels[i] + 0.02, h: hue))
+    }
+
+    palette[15] = lightMode
+        ? ColorMath.hex(fromOKLCH: OKLCH(l: 0.10, c: 0.04, h: baseHue))
+        : ColorMath.hex(fromOKLCH: OKLCH(l: 0.97, c: 0.015, h: baseHue))
+
+    return palette
+}
+
+// MARK: Colour-theory schemes
+
+// schemeBackground synthesizes near-extreme bg/fg with a subtle hue tint, so
+// the structural hue relationships do the visual work.
+func schemeBackground(_ baseHue: Double, _ lightMode: Bool) -> (String, String) {
+    if lightMode {
+        return (ColorMath.hex(fromOKLCH: OKLCH(l: 0.96, c: 0.012, h: baseHue)),
+                ColorMath.hex(fromOKLCH: OKLCH(l: 0.22, c: 0.04, h: baseHue)))
+    }
+    return (ColorMath.hex(fromOKLCH: OKLCH(l: 0.13, c: 0.022, h: baseHue)),
+            ColorMath.hex(fromOKLCH: OKLCH(l: 0.88, c: 0.025, h: baseHue)))
+}
+
+func buildSchemePalette(_ baseHue: Double, _ lightMode: Bool,
+                        _ hues: [Double], _ chromas: [Double], _ lightnessOffsets: [Double]) -> [String] {
+    let lightnessBase = lightMode ? 0.48 : 0.65
+
+    var palette = Array(repeating: "", count: 16)
+    (palette[0], palette[7]) = schemeBackground(baseHue, lightMode)
+
+    for i in 0..<6 {
+        let l = clampF(lightnessBase + lightnessOffsets[i], 0.30, 0.85)
+        palette[i + 1] = ColorMath.hex(fromOKLCH: OKLCH(l: l, c: chromas[i],
+                                                        h: (hues[i] + 360).truncatingRemainder(dividingBy: 360)))
+    }
+
+    finalizePalette(&palette)
+    return palette
+}
+
+func generateComplementaryPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let compHue = (baseHue + 180).truncatingRemainder(dividingBy: 360)
+
+    let hues: [Double] = [baseHue - 8, compHue - 8, baseHue, compHue, baseHue + 8, compHue + 8]
+    let chromas: [Double] = [0.14, 0.14, 0.11, 0.11, 0.16, 0.16]
+    let offsets: [Double] = [-0.06, -0.04, +0.04, +0.02, +0.08, +0.06]
+    return buildSchemePalette(baseHue, lightMode, hues, chromas, offsets)
+}
+
+func generateTriadicPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let h2 = (baseHue + 120).truncatingRemainder(dividingBy: 360)
+    let h3 = (baseHue + 240).truncatingRemainder(dividingBy: 360)
+
+    let hues: [Double] = [baseHue, h2, h3, baseHue, h2, h3]
+    let chromas: [Double] = [0.13, 0.13, 0.13, 0.16, 0.16, 0.16]
+    let offsets: [Double] = [+0.05, +0.05, +0.05, -0.07, -0.07, -0.07]
+    return buildSchemePalette(baseHue, lightMode, hues, chromas, offsets)
+}
+
+func generateSplitComplementaryPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let h2 = (baseHue + 150).truncatingRemainder(dividingBy: 360)
+    let h3 = (baseHue + 210).truncatingRemainder(dividingBy: 360)
+
+    let hues: [Double] = [baseHue, h2, h3, baseHue, h2, h3]
+    let chromas: [Double] = [0.14, 0.13, 0.13, 0.17, 0.16, 0.16]
+    let offsets: [Double] = [+0.05, +0.05, +0.05, -0.06, -0.06, -0.06]
+    return buildSchemePalette(baseHue, lightMode, hues, chromas, offsets)
+}
+
+func generateTetradicPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let h2 = (baseHue + 90).truncatingRemainder(dividingBy: 360)
+    let h3 = (baseHue + 180).truncatingRemainder(dividingBy: 360)
+    let h4 = (baseHue + 270).truncatingRemainder(dividingBy: 360)
+
+    let hues: [Double] = [baseHue, h2, h3, h4, baseHue, h3]
+    let chromas: [Double] = [0.12, 0.12, 0.12, 0.12, 0.15, 0.15]
+    let offsets: [Double] = [+0.04, -0.02, +0.04, -0.02, +0.10, +0.10]
+    return buildSchemePalette(baseHue, lightMode, hues, chromas, offsets)
+}
+
+// MARK: Mood palettes
+
+typealias MoodSpec = (
+    bgDark: OKLCH, bgLight: OKLCH, fgDark: OKLCH, fgLight: OKLCH,
+    ansiHueAnchor: Double, ansiTintStrength: Double,
+    ansiChromaMin: Double, ansiChromaMax: Double,
+    ansiLightnessDark: Double, ansiLightnessLight: Double,
+    stagger: [Double]
+)
+
+// moodPalette pulls each ANSI hue toward the mood anchor by tintStrength
+// (0 keeps the image hue, 1 replaces it), clamps chroma into the mood's band
+// and sets lightness at the mood's target plus the per-slot stagger.
+func moodPalette(_ dominantColors: [String], _ lightMode: Bool, _ spec: MoodSpec) -> [String] {
+    let bgRule = OklchRule(light: { _ in spec.bgLight }, dark: { _ in spec.bgDark })
+    let fgRule = OklchRule(light: { _ in spec.fgLight }, dark: { _ in spec.fgDark })
+    let ansiRule = OklchRule(
+        light: { lch in
+            let h = pullHueToward(lch.h, spec.ansiHueAnchor, spec.ansiTintStrength)
+            return OKLCH(l: spec.ansiLightnessLight, c: clampF(lch.c, spec.ansiChromaMin, spec.ansiChromaMax), h: h)
+        },
+        dark: { lch in
+            let h = pullHueToward(lch.h, spec.ansiHueAnchor, spec.ansiTintStrength)
+            return OKLCH(l: spec.ansiLightnessDark, c: clampF(lch.c, spec.ansiChromaMin, spec.ansiChromaMax), h: h)
+        })
+    return transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, spec.stagger)
+}
+
+func generateFirePalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.09, c: 0.045, h: 28),
+        bgLight: OKLCH(l: 0.95, c: 0.030, h: 45),
+        fgDark: OKLCH(l: 0.90, c: 0.040, h: 55),
+        fgLight: OKLCH(l: 0.22, c: 0.060, h: 20),
+        ansiHueAnchor: 30, ansiTintStrength: 0.28,
+        ansiChromaMin: 0.07, ansiChromaMax: 0.12,
+        ansiLightnessDark: 0.62, ansiLightnessLight: 0.46,
+        stagger: [-0.05, +0.01, +0.07, -0.04, -0.02, +0.03]))
+}
+
+func generateOceanPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.10, c: 0.050, h: 240),
+        bgLight: OKLCH(l: 0.96, c: 0.030, h: 215),
+        fgDark: OKLCH(l: 0.90, c: 0.035, h: 205),
+        fgLight: OKLCH(l: 0.20, c: 0.055, h: 230),
+        ansiHueAnchor: 220, ansiTintStrength: 0.28,
+        ansiChromaMin: 0.09, ansiChromaMax: 0.14,
+        ansiLightnessDark: 0.60, ansiLightnessLight: 0.44,
+        stagger: [-0.05, +0.02, +0.06, -0.03, -0.01, +0.03]))
+}
+
+func generateForestPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.13, c: 0.040, h: 145),
+        bgLight: OKLCH(l: 0.95, c: 0.025, h: 130),
+        fgDark: OKLCH(l: 0.88, c: 0.035, h: 125),
+        fgLight: OKLCH(l: 0.24, c: 0.050, h: 140),
+        ansiHueAnchor: 145, ansiTintStrength: 0.25,
+        ansiChromaMin: 0.06, ansiChromaMax: 0.10,
+        ansiLightnessDark: 0.66, ansiLightnessLight: 0.48,
+        stagger: [-0.05, +0.02, +0.07, -0.03, -0.01, +0.04]))
+}
+
+func generateEarthtonePalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.18, c: 0.040, h: 40),
+        bgLight: OKLCH(l: 0.93, c: 0.025, h: 60),
+        fgDark: OKLCH(l: 0.84, c: 0.050, h: 50),
+        fgLight: OKLCH(l: 0.26, c: 0.055, h: 35),
+        ansiHueAnchor: 45, ansiTintStrength: 0.40,
+        ansiChromaMin: 0.05, ansiChromaMax: 0.09,
+        ansiLightnessDark: 0.58, ansiLightnessLight: 0.44,
+        stagger: [-0.10, -0.04, +0.04, +0.10, -0.07, +0.07]))
+}
+
+func generateNeonPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.05, c: 0.030, h: 280),
+        bgLight: OKLCH(l: 0.97, c: 0.015, h: 280),
+        fgDark: OKLCH(l: 0.92, c: 0.045, h: 175),
+        fgLight: OKLCH(l: 0.18, c: 0.060, h: 290),
+        ansiHueAnchor: 0, ansiTintStrength: 0,
+        ansiChromaMin: 0.20, ansiChromaMax: 0.26,
+        ansiLightnessDark: 0.72, ansiLightnessLight: 0.50,
+        stagger: [-0.03, +0.01, +0.04, -0.02, -0.01, +0.02]))
+}
+
+func generateSunsetPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.12, c: 0.060, h: 350),
+        bgLight: OKLCH(l: 0.96, c: 0.030, h: 30),
+        fgDark: OKLCH(l: 0.90, c: 0.050, h: 30),
+        fgLight: OKLCH(l: 0.24, c: 0.060, h: 350),
+        ansiHueAnchor: 20, ansiTintStrength: 0.32,
+        ansiChromaMin: 0.12, ansiChromaMax: 0.18,
+        ansiLightnessDark: 0.70, ansiLightnessLight: 0.50,
+        stagger: [-0.05, +0.02, +0.07, -0.04, -0.02, +0.04]))
+}
+
+func generateVaporwavePalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.15, c: 0.060, h: 315),
+        bgLight: OKLCH(l: 0.96, c: 0.025, h: 320),
+        fgDark: OKLCH(l: 0.90, c: 0.060, h: 190),
+        fgLight: OKLCH(l: 0.26, c: 0.060, h: 310),
+        ansiHueAnchor: 320, ansiTintStrength: 0.28,
+        ansiChromaMin: 0.10, ansiChromaMax: 0.16,
+        ansiLightnessDark: 0.74, ansiLightnessLight: 0.52,
+        stagger: [-0.04, +0.02, +0.06, -0.03, -0.01, +0.04]))
+}
+
+func generateMidnightPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.07, c: 0.035, h: 250),
+        bgLight: OKLCH(l: 0.95, c: 0.020, h: 240),
+        fgDark: OKLCH(l: 0.88, c: 0.020, h: 220),
+        fgLight: OKLCH(l: 0.22, c: 0.045, h: 250),
+        ansiHueAnchor: 250, ansiTintStrength: 0.20,
+        ansiChromaMin: 0.07, ansiChromaMax: 0.12,
+        ansiLightnessDark: 0.62, ansiLightnessLight: 0.42,
+        stagger: [-0.04, +0.01, +0.05, -0.03, -0.02, +0.03]))
+}
+
+func generateAuroraPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    return moodPalette(dominantColors, lightMode, (
+        bgDark: OKLCH(l: 0.08, c: 0.045, h: 240),
+        bgLight: OKLCH(l: 0.96, c: 0.025, h: 220),
+        fgDark: OKLCH(l: 0.92, c: 0.040, h: 175),
+        fgLight: OKLCH(l: 0.20, c: 0.055, h: 240),
+        ansiHueAnchor: 160, ansiTintStrength: 0.42,
+        ansiChromaMin: 0.12, ansiChromaMax: 0.18,
+        ansiLightnessDark: 0.70, ansiLightnessLight: 0.50,
+        stagger: [-0.05, +0.02, +0.06, -0.03, -0.01, +0.04]))
+}
+
+// MARK: Practical palettes
+
+// High Contrast: image-aware hues on a hard-extreme background, every ANSI
+// slot at WCAG AAA (7:1).
+func generateHighContrastPalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let bgRule = OklchRule(
+        light: { OKLCH(l: 0.99, c: 0.005, h: $0.h) },
+        dark: { OKLCH(l: 0.05, c: 0.010, h: $0.h) })
+    let fgRule = OklchRule(
+        light: { OKLCH(l: 0.10, c: 0.020, h: $0.h) },
+        dark: { OKLCH(l: 0.95, c: 0.015, h: $0.h) })
+    let ansiRule = OklchRule(
+        light: { OKLCH(l: 0.32, c: clampF($0.c, 0.10, 0.18), h: $0.h) },
+        dark: { OKLCH(l: 0.82, c: clampF($0.c, 0.10, 0.18), h: $0.h) })
+    let stagger: [Double] = [-0.03, +0.01, +0.04, -0.02, -0.01, +0.02]
+
+    var palette = transformChromaticPalette(dominantColors, lightMode, bgRule, fgRule, ansiRule, stagger)
+    for i in 1...6 {
+        if ColorMath.contrastRatio(palette[0], palette[i]) >= Extract.minHighContrastRatio { continue }
+        palette[i] = boostContrastAgainstBg(palette[i], palette[0], Extract.minHighContrastRatio)
+        palette[i + 8] = generateBrightVersion(palette[i])
+    }
+    return palette
+}
+
+// Duotone: two hues only, alternating at three lightness levels; structure
+// comes entirely from lightness.
+func generateDuotonePalette(_ dominantColors: [String], _ lightMode: Bool) -> [String] {
+    let baseHue = extractDominantHue(dominantColors)
+    let compHue = (baseHue + 180).truncatingRemainder(dividingBy: 360)
+
+    var palette = Array(repeating: "", count: 16)
+    if lightMode {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: 0.97, c: 0.008, h: baseHue))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: 0.20, c: 0.025, h: baseHue))
+    } else {
+        palette[0] = ColorMath.hex(fromOKLCH: OKLCH(l: 0.12, c: 0.018, h: baseHue))
+        palette[7] = ColorMath.hex(fromOKLCH: OKLCH(l: 0.90, c: 0.020, h: baseHue))
+    }
+
+    let lightnessLevels: [Double] = [-0.10, -0.10, +0.04, +0.04, +0.14, +0.14]
+    let hues: [Double] = [baseHue, compHue, baseHue, compHue, baseHue, compHue]
+    let chroma = 0.09
+    let lightnessBase = lightMode ? 0.50 : 0.62
+
+    for i in 0..<6 {
+        let l = clampF(lightnessBase + lightnessLevels[i], 0.30, 0.85)
+        palette[i + 1] = ColorMath.hex(fromOKLCH: OKLCH(l: l, c: chroma, h: hues[i]))
+    }
+
+    finalizePalette(&palette)
+    return palette
+}
+
 // MARK: Finalize and dispatch
 
 // Slots 0, 7 and 1-6 must be set; 8, 9-14 and 15 are derived here, and AA
@@ -1703,8 +2167,52 @@ func normalizeCounts(_ counts: [Int]) -> [Double]? {
 // entries of the 23-mode list.
 func generatePaletteByMode(_ dominantColors: [String], _ weights: [Double]?, _ lightMode: Bool, _ mode: String) -> [String] {
     switch mode {
+    case "magic":
+        fail("magic is generated from an image; use palette magic or palette extract --mode magic")
     case "monochromatic":
         return generateMonochromaticPalette(dominantColors, lightMode)
+    case "analogous":
+        return generateAnalogousPalette(dominantColors, lightMode)
+    case "complementary":
+        return generateComplementaryPalette(dominantColors, lightMode)
+    case "triadic":
+        return generateTriadicPalette(dominantColors, lightMode)
+    case "split-complementary":
+        return generateSplitComplementaryPalette(dominantColors, lightMode)
+    case "tetradic":
+        return generateTetradicPalette(dominantColors, lightMode)
+    case "pastel":
+        return generatePastelPalette(dominantColors, lightMode)
+    case "colorful":
+        return generateColorfulPalette(dominantColors, lightMode)
+    case "muted":
+        return generateMutedPalette(dominantColors, lightMode)
+    case "bright":
+        return generateBrightPalette(dominantColors, lightMode)
+    case "material":
+        return generateMaterialPalette(dominantColors, lightMode)
+    case "fire":
+        return generateFirePalette(dominantColors, lightMode)
+    case "ocean":
+        return generateOceanPalette(dominantColors, lightMode)
+    case "forest":
+        return generateForestPalette(dominantColors, lightMode)
+    case "earthtone":
+        return generateEarthtonePalette(dominantColors, lightMode)
+    case "neon":
+        return generateNeonPalette(dominantColors, lightMode)
+    case "sunset":
+        return generateSunsetPalette(dominantColors, lightMode)
+    case "vaporwave":
+        return generateVaporwavePalette(dominantColors, lightMode)
+    case "midnight":
+        return generateMidnightPalette(dominantColors, lightMode)
+    case "aurora":
+        return generateAuroraPalette(dominantColors, lightMode)
+    case "high-contrast":
+        return generateHighContrastPalette(dominantColors, lightMode)
+    case "duotone":
+        return generateDuotonePalette(dominantColors, lightMode)
     case "chromatic":
         return generateChromaticPalette(dominantColors, weights, lightMode)
     case "monochrome":
@@ -1715,7 +2223,7 @@ func generatePaletteByMode(_ dominantColors: [String], _ weights: [Double]?, _ l
         }
         return generateChromaticPalette(dominantColors, weights, lightMode)
     default:
-        fail("extraction mode \"\(mode)\" is not built yet (Phase 2b)")
+        fail("unknown extraction mode \"\(mode)\"")
     }
 }
 
@@ -1723,14 +2231,941 @@ func extractionModeExists(_ mode: String) -> Bool {
     mode == "magic" || mode == "chromatic" || mode == "monochrome" || Modes.all.contains { $0.value == mode }
 }
 
-func extractColors(url: URL, light: Bool, mode: String) throws -> [String] {
-    let dominant = try extractDominantColors(url: url, count: Extract.dominantColorsToExtract)
+// Extraction results are cached under ~/.local/state/omacosy/studio/palettes,
+// keyed by resolved path + mtime (milliseconds) + ladder + mode, so a repeat
+// ask answers in tens of milliseconds. Version 1; bump when a generator's
+// output changes meaningfully.
+enum ExtractCache {
+    static let version = 1
+
+    static var dir: String { "\(Wallpapers.stateDir)/studio/palettes" }
+
+    static func key(path: String, light: Bool, mode: String) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let mtime = attrs[.modificationDate] as? Date else { return nil }
+        let millis = Int64((mtime.timeIntervalSince1970 * 1000).rounded())
+        let seed = "\(path)-\(millis)-\(light ? "light" : "dark")"
+        let digest = Insecure.MD5.hash(data: Data(seed.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        return "\(digest)_\(mode)_v\(version)"
+    }
+
+    static func load(_ key: String) -> [String]? {
+        guard let data = FileManager.default.contents(atPath: "\(dir)/\(key).json"),
+              let top = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              JSONField.int(top["version"]) == version,
+              let colors = top["palette"] as? [String], colors.count == 16,
+              colors.allSatisfy({ $0.hasPrefix("#") && $0.count == 7 })
+        else { return nil }
+        return colors
+    }
+
+    static func save(_ key: String, _ palette: [String]) {
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let object: [String: Any] = ["version": version, "saved": isoNow(), "palette": palette]
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            try data.write(to: URL(fileURLWithPath: "\(dir)/\(key).json"), options: .atomic)
+        } catch {
+            warn("could not write the palette cache: \(error.localizedDescription)")
+        }
+    }
+}
+
+func extractColors(url: URL, light: Bool, mode: String, useCache: Bool = true,
+                   canonicalOrder: Bool = false) throws -> [String] {
+    if mode == "magic" { return try magicPalette(url: url, useCache: useCache) }
+
+    var cacheKey: String? = nil
+    if useCache && !canonicalOrder,
+       let key = ExtractCache.key(path: url.path, light: light, mode: mode) {
+        if let cached = ExtractCache.load(key) { return cached }
+        cacheKey = key
+    }
+
+    var dominant = try extractDominantColors(url: url, count: Extract.dominantColorsToExtract)
     if dominant.colors.count < 8 {
         throw ThemeError(message: "not enough colors extracted from image")
     }
+    // Median-cut ties have no inherent order (Aether's final sort is
+    // unstable); --canonical fixes them to count-desc, hex-asc so recorded
+    // corpus palettes compare byte for byte. Test support only.
+    if canonicalOrder {
+        let pairs = zip(dominant.colors, dominant.counts).sorted {
+            $0.1 != $1.1 ? $0.1 > $1.1 : $0.0 < $1.0
+        }
+        dominant = (pairs.map { $0.0 }, pairs.map { $0.1 })
+    }
     let weights = normalizeCounts(dominant.counts)
-    let palette = generatePaletteByMode(dominant.colors, weights, light, mode)
-    return normalizeBrightness(palette)
+    let palette = normalizeBrightness(generatePaletteByMode(dominant.colors, weights, light, mode))
+
+    if let cacheKey { ExtractCache.save(cacheKey, palette) }
+    return palette
+}
+
+// MARK: - Magic: the Omacosy bridge (Phase 2b)
+
+// Ported verbatim from helper/derive.swift — the engine that paints the bar,
+// the auto-theme and the focus ring. Magic must reproduce, byte for byte,
+// the colours omacosy-derive writes for the same image, so this is a
+// deliberate copy: a one-file helper cannot be imported, and the harness
+// diffs the copy against the original across the 30-image corpus. The
+// comments and the reasoning live in derive.swift; only the code is here.
+enum DerivePort {
+    // derive.swift's RGB: 0...1 components, quantised to 8 bits by q8().
+    struct RGB {
+        var r: Double, g: Double, b: Double
+
+        init(r: Double, g: Double, b: Double) { self.r = r; self.g = g; self.b = b }
+
+        init(hex: String) {
+            let v = ColorMath.hexUInt32(hex) ?? 0
+            self.init(r: Double((v >> 16) & 0xff) / 255,
+                      g: Double((v >> 8) & 0xff) / 255,
+                      b: Double(v & 0xff) / 255)
+        }
+
+        var lum: Double { 0.299 * r + 0.587 * g + 0.114 * b }
+
+        var hex: String {
+            func q(_ v: Double) -> Int { Int((min(1, max(0, v)) * 255).rounded()) }
+            return String(format: "%02x%02x%02x", q(r), q(g), q(b))
+        }
+    }
+
+    // Fixed so the output is reproducible on any display, exactly as
+    // derive.swift fixes it.
+    static let frameW: Double = 1440
+    static let frameH: Double = 900
+    static let barHeight: Double = 34
+    static let menuBarSaturation = 1.3
+    static let menuBarDarken = 0.923
+
+    static let white = RGB(r: 1, g: 1, b: 1)
+    static let black = RGB(r: 0, g: 0, b: 0)
+
+    static func clamp01(_ v: Double) -> Double { min(1, max(0, v)) }
+
+    static func toHSV(_ c: RGB) -> (h: Double, s: Double, v: Double) {
+        let mx = max(c.r, c.g, c.b), mn = min(c.r, c.g, c.b)
+        let d = mx - mn
+        var h = 0.0
+        if d > 0 {
+            if mx == c.r { h = (c.g - c.b) / d }
+            else if mx == c.g { h = 2 + (c.b - c.r) / d }
+            else { h = 4 + (c.r - c.g) / d }
+            h *= 60
+            if h < 0 { h += 360 }
+        }
+        return (h, mx == 0 ? 0 : d / mx, mx)
+    }
+
+    static func fromHSV(_ h: Double, _ s: Double, _ v: Double) -> RGB {
+        let hh = h.truncatingRemainder(dividingBy: 360) < 0
+            ? h.truncatingRemainder(dividingBy: 360) + 360
+            : h.truncatingRemainder(dividingBy: 360)
+        let S = clamp01(s), V = clamp01(v)
+        if S == 0 { return RGB(r: V, g: V, b: V) }
+        let i = Int(hh / 60) % 6
+        let f = hh / 60 - Double(Int(hh / 60))
+        let p = V * (1 - S), q = V * (1 - S * f), t = V * (1 - S * (1 - f))
+        switch i {
+        case 0: return RGB(r: V, g: t, b: p)
+        case 1: return RGB(r: q, g: V, b: p)
+        case 2: return RGB(r: p, g: V, b: t)
+        case 3: return RGB(r: p, g: q, b: V)
+        case 4: return RGB(r: t, g: p, b: V)
+        default: return RGB(r: V, g: p, b: q)
+        }
+    }
+
+    static func blend(_ c: RGB, toward t: RGB, _ k: Double) -> RGB {
+        RGB(r: c.r * (1 - k) + t.r * k,
+            g: c.g * (1 - k) + t.g * k,
+            b: c.b * (1 - k) + t.b * k)
+    }
+
+    // Snap to the 8 bits per channel that actually get written; the contrast
+    // loops compare quantised values.
+    static func q8(_ c: RGB) -> RGB {
+        func q(_ v: Double) -> Double { (clamp01(v) * 255).rounded() / 255 }
+        return RGB(r: q(c.r), g: q(c.g), b: q(c.b))
+    }
+
+    // MARK: image analysis
+
+    // The mean of the band the bar covers, in the centred fill-crop for
+    // 1440x900. baseColour is this mean through the fitted menu-bar transform.
+    static func fillCropMean(of url: URL) -> RGB? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: cg)
+        guard bitmap.pixelsWide > 0, bitmap.pixelsHigh > 0 else { return nil }
+
+        let sx = frameW / Double(bitmap.pixelsWide)
+        let sy = frameH / Double(bitmap.pixelsHigh)
+        let scale = max(sx, sy)
+        let band = max(1, Int(barHeight / scale))
+        let visibleW = Int(frameW / scale)
+        let x0 = max(0, (bitmap.pixelsWide - visibleW) / 2)
+
+        var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+        for x in stride(from: x0, to: min(x0 + visibleW, bitmap.pixelsWide),
+                        by: max(1, visibleW / 64)) {
+            for y in stride(from: 0, to: band, by: max(1, band / 4)) {
+                // usingColorSpace(.sRGB) is NOT optional: an embedded profile
+                // read raw lands up to 22/255 away.
+                guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+                else { continue }
+                r += Double(c.redComponent)
+                g += Double(c.greenComponent)
+                b += Double(c.blueComponent)
+                n += 1
+            }
+        }
+        guard n > 0 else { return nil }
+        return RGB(r: r / n, g: g / n, b: b / n)
+    }
+
+    static func baseColour(of url: URL) -> RGB? {
+        guard let mean = fillCropMean(of: url) else { return nil }
+        let luma = 0.299 * mean.r + 0.587 * mean.g + 0.114 * mean.b
+        func menuBarLike(_ v: Double) -> Double {
+            clamp01((luma + menuBarSaturation * (v - luma)) * menuBarDarken)
+        }
+        return RGB(r: menuBarLike(mean.r), g: menuBarLike(mean.g), b: menuBarLike(mean.b))
+    }
+
+    static func bitmap(of url: URL) -> NSBitmapImageRep? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let bm = NSBitmapImageRep(cgImage: cg)
+        guard bm.pixelsWide > 0, bm.pixelsHigh > 0 else { return nil }
+        return bm
+    }
+
+    // The wallpaper behind the bar in 8 slices across the screen, raw pixels.
+    static func stripSlices(of url: URL) -> [RGB] {
+        guard let bm = bitmap(of: url) else { return [] }
+        let scale = max(frameW / Double(bm.pixelsWide), frameH / Double(bm.pixelsHigh))
+        let band = max(1, Int(barHeight / scale)), visW = Int(frameW / scale)
+        let x0 = max(0, (bm.pixelsWide - visW) / 2)
+        var out: [RGB] = []
+        for i in 0..<8 {
+            let xs = x0 + i * visW / 8, xe = min(bm.pixelsWide, x0 + (i + 1) * visW / 8)
+            var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+            for x in stride(from: xs, to: xe, by: max(1, (xe - xs) / 32)) {
+                for y in stride(from: 0, to: band, by: max(1, band / 6)) {
+                    guard let c = bm.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    r += Double(c.redComponent); g += Double(c.greenComponent); b += Double(c.blueComponent); n += 1
+                }
+            }
+            if n > 0 { out.append(RGB(r: r / n, g: g / n, b: b / n)) }
+        }
+        return out
+    }
+
+    // The 90th percentile of OKLCH chroma over the picture: how colourful it
+    // is, where HSV saturation misleads.
+    static func pictureChroma(of url: URL) -> Double? {
+        guard let bm = bitmap(of: url) else { return nil }
+        var cs: [Double] = []
+        for x in stride(from: 0, to: bm.pixelsWide, by: max(1, bm.pixelsWide / 150)) {
+            for y in stride(from: 0, to: bm.pixelsHigh, by: max(1, bm.pixelsHigh / 150)) {
+                guard let c = bm.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                cs.append(toOKLCH(RGB(r: Double(c.redComponent), g: Double(c.greenComponent),
+                                      b: Double(c.blueComponent))).C)
+            }
+        }
+        guard !cs.isEmpty else { return nil }
+        cs.sort()
+        return cs[Int(Double(cs.count - 1) * 0.9)]
+    }
+
+    // The picture's warm light: OKLCH hue 40-120 with chroma >= 0.03,
+    // circular mean weighted by chroma.
+    static func warmToneColour(of url: URL) -> (hue: Double, share: Double)? {
+        guard let bm = bitmap(of: url) else { return nil }
+        var hx = 0.0, hy = 0.0, n = 0.0, all = 0.0
+        for x in stride(from: 0, to: bm.pixelsWide, by: max(1, bm.pixelsWide / 200)) {
+            for y in stride(from: 0, to: bm.pixelsHigh, by: max(1, bm.pixelsHigh / 200)) {
+                guard let c = bm.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                let o = toOKLCH(RGB(r: Double(c.redComponent), g: Double(c.greenComponent),
+                                    b: Double(c.blueComponent)))
+                all += 1
+                guard o.h >= 40, o.h <= 120, o.C >= 0.03 else { continue }
+                let a = o.h * .pi / 180
+                hx += cos(a) * o.C; hy += sin(a) * o.C; n += 1
+            }
+        }
+        guard all > 0, n / all >= 0.001 else { return nil }
+        var h = atan2(hy, hx) * 180 / .pi
+        if h < 0 { h += 360 }
+        return (h, n / all)
+    }
+
+    // The hue the picture READS as, weighted by saturation x value cubed and
+    // smoothed over 36 buckets; nil for a greyscale photograph.
+    static func pictureColour(of url: URL) -> (hue: Double, sat: Double, share: Double)? {
+        guard let bm = bitmap(of: url) else { return nil }
+        let sx = max(1, bm.pixelsWide / 200), sy = max(1, bm.pixelsHigh / 200)
+
+        var samples: [(h: Double, s: Double, v: Double)] = []
+        samples.reserveCapacity(40000)
+        for x in stride(from: 0, to: bm.pixelsWide, by: sx) {
+            for y in stride(from: 0, to: bm.pixelsHigh, by: sy) {
+                guard let c = bm.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                let t = toHSV(RGB(r: Double(c.redComponent), g: Double(c.greenComponent),
+                                  b: Double(c.blueComponent)))
+                if t.v >= 0.10 { samples.append((t.h, t.s, t.v)) }
+            }
+        }
+        guard samples.count > 20 else { return nil }
+
+        let scores = samples.map { $0.s * $0.v }.sorted()
+        let cut = max(0.12, scores[Int(0.90 * Double(scores.count - 1))])
+        guard samples.filter({ $0.s * $0.v >= cut && $0.s >= 0.18 }).count > 5 else { return nil }
+
+        var bucket = [Double](repeating: 0, count: 36)
+        var bs = [Double](repeating: 0, count: 36)
+        for t in samples where t.s >= 0.10 {
+            let w = t.s * t.v * t.v * t.v
+            let i = min(35, Int(t.h / 10))
+            bucket[i] += w
+            bs[i] += t.s * w
+        }
+
+        var smooth = [Double](repeating: 0, count: 36)
+        for i in 0..<36 { for d in -2...2 { smooth[i] += bucket[(i + d + 36) % 36] } }
+        guard let best = smooth.indices.max(by: { smooth[$0] < smooth[$1] }), smooth[best] > 0
+        else { return nil }
+
+        var wsum = 0.0, hx = 0.0, hy = 0.0, ss = 0.0
+        for d in -2...2 {
+            let i = (best + d + 36) % 36
+            let w = bucket[i]; guard w > 0 else { continue }
+            let ang = (Double(i) * 10 + 5) * .pi / 180
+            hx += cos(ang) * w; hy += sin(ang) * w; ss += bs[i]; wsum += w
+        }
+        guard wsum > 0 else { return nil }
+        var h = atan2(hy, hx) * 180 / .pi
+        if h < 0 { h += 360 }
+        let totalWeight = bucket.reduce(0, +)
+        return (h, min(1.0, ss / wsum), totalWeight > 0 ? smooth[best] / totalWeight : 0)
+    }
+
+    // The hue the picture has in its shadows, for a pill below the bar.
+    static func darkToneColour(of url: URL) -> (hue: Double, sat: Double)? {
+        guard let bm = bitmap(of: url) else { return nil }
+        let sx = max(1, bm.pixelsWide / 200), sy = max(1, bm.pixelsHigh / 200)
+        var hx = 0.0, hy = 0.0, w = 0.0, ss = 0.0, n = 0.0, all = 0.0
+        for x in stride(from: 0, to: bm.pixelsWide, by: sx) {
+            for y in stride(from: 0, to: bm.pixelsHigh, by: sy) {
+                guard let c = bm.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                let t = toHSV(RGB(r: Double(c.redComponent), g: Double(c.greenComponent),
+                                  b: Double(c.blueComponent)))
+                all += 1
+                guard t.v >= 0.12, t.v <= 0.50, t.s >= 0.20 else { continue }
+                let a = t.h * .pi / 180
+                let k = t.s * (0.55 - t.v)
+                hx += cos(a) * k; hy += sin(a) * k; w += k; ss += t.s; n += 1
+            }
+        }
+        guard n >= 0.05 * all, w > 0 else { return nil }
+        var h = atan2(hy, hx) * 180 / .pi
+        if h < 0 { h += 360 }
+        return (h, ss / n)
+    }
+
+    // MARK: OKLCH and contrast
+
+    static func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+    static func gam(_ v: Double) -> Double { v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055 }
+
+    static func toOKLCH(_ c: RGB) -> (L: Double, C: Double, h: Double) {
+        let r = lin(c.r), g = lin(c.g), b = lin(c.b)
+        let l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        let m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        let s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        let L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+        let A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+        let B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        var h = atan2(B, A) * 180 / .pi; if h < 0 { h += 360 }
+        return (L, (A * A + B * B).squareRoot(), h)
+    }
+
+    // nil when the colour is outside sRGB
+    static func fromOKLCH(_ L: Double, _ C: Double, _ h: Double) -> RGB? {
+        let A = C * cos(h * .pi / 180), B = C * sin(h * .pi / 180)
+        let l = pow(L + 0.3963377774 * A + 0.2158037573 * B, 3)
+        let m = pow(L - 0.1055613458 * A - 0.0638541728 * B, 3)
+        let s = pow(L - 0.0894841775 * A - 1.2914855480 * B, 3)
+        let r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+        let g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+        let b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        let e = 0.0001
+        guard r >= -e, r <= 1 + e, g >= -e, g <= 1 + e, b >= -e, b <= 1 + e else { return nil }
+        return RGB(r: gam(clamp01(r)), g: gam(clamp01(g)), b: gam(clamp01(b)))
+    }
+
+    // A colour at this lightness and hue; chroma drops until it fits sRGB.
+    static func oklchFit(_ L: Double, _ C: Double, _ h: Double) -> RGB? {
+        var cc = C
+        while cc >= 0 { if let x = fromOKLCH(L, cc, h) { return x }; cc -= 0.005 }
+        return nil
+    }
+
+    static func relLum(_ c: RGB) -> Double {
+        let q = q8(c)
+        return 0.2126 * lin(q.r) + 0.7152 * lin(q.g) + 0.0722 * lin(q.b)
+    }
+
+    static func contrast(_ a: RGB, _ b: RGB) -> Double {
+        let x = relLum(a), y = relLum(b)
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+    }
+
+    static func legible(_ c: RGB, against refs: [RGB], ratio: Double) -> RGB {
+        func worst(_ x: RGB) -> Double { refs.map { contrast(x, $0) }.min() ?? 99 }
+        if worst(c) >= ratio { return c }
+        let o = toOKLCH(c)
+        var best = c, bestScore = worst(c)
+        for dir in [1.0, -1.0] {
+            var L = o.L
+            while L > 0.0 && L < 1.0 {
+                L += 0.005 * dir
+                guard let x = oklchFit(L, o.C, o.h) else { continue }
+                let w = worst(x)
+                if w >= ratio {
+                    if bestScore < ratio || abs(L - o.L) < abs(toOKLCH(best).L - o.L) { best = x; bestScore = w }
+                    break
+                }
+                if bestScore < ratio && w > bestScore { best = x; bestScore = w }
+            }
+        }
+        return best
+    }
+
+    static func brighten(_ c: RGB, from ref: RGB, need: Double) -> RGB {
+        let lr = q8(ref).lum
+        if lr + need > 0.85 { return separate(c, from: ref, need: need) }
+        if q8(c).lum >= lr + need { return c }
+        for step in 1...50 {
+            let cand = blend(c, toward: white, 0.02 * Double(step))
+            if q8(cand).lum >= lr + need { return cand }
+        }
+        return separate(c, from: ref, need: need)
+    }
+
+    // MARK: the floors
+
+    static func separate(_ c: RGB, from ref: RGB, need: Double) -> RGB {
+        let lr = q8(ref).lum
+        if abs(q8(c).lum - lr) >= need { return c }
+        let target = (1 - lr) >= lr ? white : black
+        for step in 1...50 {
+            let cand = blend(c, toward: target, 0.02 * Double(step))
+            if abs(q8(cand).lum - lr) >= need { return cand }
+        }
+        return target
+    }
+
+    static func towardLum(_ c: RGB, _ wanted: Double) -> RGB {
+        let target = wanted > q8(c).lum ? white : black
+        var best = c
+        for step in 0...50 {
+            let cand = blend(c, toward: target, 0.02 * Double(step))
+            if abs(q8(cand).lum - wanted) < abs(q8(best).lum - wanted) { best = cand }
+        }
+        return best
+    }
+
+    static func clearOf(_ c: RGB, bar: RGB, pill: RGB, preferUp: Bool) -> RGB {
+        let lb = q8(bar).lum, lp = q8(pill).lum
+        let lo = min(lb - 0.28, lp - 0.20)
+        let hi = max(lb + 0.28, lp + 0.20)
+        let lc = q8(c).lum
+        if lc <= lo || lc >= hi { return c }
+        let downOK = lo >= 0.0, upOK = hi <= 1.0
+        let goUp: Bool
+        if upOK && downOK { goUp = preferUp }
+        else if upOK { goUp = true }
+        else if downOK { goUp = false }
+        else { goUp = (1.0 - lc) >= lc }
+        let target = goUp ? white : black
+        let wanted = goUp ? hi : lo
+        for step in 1...50 {
+            let cand = blend(c, toward: target, 0.02 * Double(step))
+            let l = q8(cand).lum
+            if goUp ? (l >= wanted) : (l <= wanted) { return cand }
+        }
+        return target
+    }
+
+    // MARK: the role engine
+
+    struct Palette {
+        var bar: RGB, pill: RGB, muted: RGB, label: RGB, accent: RGB, ring: RGB
+        var surface: RGB
+        var isLight: Bool, isLowChroma: Bool
+        var hue: Double, sat: Double, val: Double
+    }
+
+    static func derive(_ base: RGB, picture: (hue: Double, sat: Double, share: Double)?,
+                       darkTone: (hue: Double, sat: Double)?, strip: [RGB], chroma: Double?,
+                       warm: (hue: Double, share: Double)?) -> Palette {
+        let (baseH, baseS, V) = toHSV(base)
+        let H = picture?.hue ?? 0
+        let S = picture?.sat ?? 0
+        let low = picture == nil
+
+        var pillH = baseH, pillS = baseS
+        if let p = picture, p.share >= 0.65 {
+            let gap = min(abs(p.hue - baseH), 360 - abs(p.hue - baseH))
+            if gap <= 90 { pillH = p.hue; pillS = max(baseS, p.sat * 0.7) }
+        }
+
+        var accentH = baseH, accentS = baseS
+        if let p = picture, p.share >= 0.50 { accentH = p.hue; accentS = max(baseS, p.sat) }
+        let light = base.lum > 0.45
+
+        let greenish = accentH >= 70 && accentH <= 150
+        let tame = greenish ? min(1.0, max(0.35, accentS * 1.5)) : 1.0
+
+        var pill: RGB, muted: RGB, label: RGB, accent: RGB
+        var shiftedRing: RGB? = nil
+        if light {
+            pill   = fromHSV(pillH, pillS * 0.75, V * 0.80)
+            muted  = fromHSV(pillH, min(pillS, 0.30), V * 0.42)
+            label  = fromHSV(pillH, min(pillS, 0.38), V * 0.16)
+            accent = low ? fromHSV(0, 0, 0.06)
+                         : fromHSV(accentH, min(tame, min(0.92, max(0.35, accentS * 2.4))), 0.92)
+        } else {
+            pill   = fromHSV(pillH, pillS * 0.85, max(V + 0.11, 0.20))
+            muted  = fromHSV(pillH, min(pillS, 0.22), 0.48)
+            label  = fromHSV(pillH, min(pillS, 0.18), 0.92)
+            accent = low ? fromHSV(0, 0, 0.99)
+                         : fromHSV(accentH, min(tame, min(0.95, max(0.35, accentS * 2.4))), 0.92)
+        }
+
+        pill   = separate(pill,   from: base, need: 0.085)
+        label  = separate(label,  from: pill, need: 0.50)
+        let brokenLabel = q8(label).lum < q8(pill).lum
+        if !light {
+            let want = (!brokenLabel && q8(base).lum - 0.085 < 0.10)
+                ? q8(pill).lum
+                : min(q8(base).lum - 0.085, 0.20)
+            let dh = darkTone?.hue ?? baseH
+            let ds = darkTone.map { min($0.sat, 0.55) } ?? baseS * 0.45
+            pill  = towardLum(fromHSV(dh, ds, V), want)
+            label = separate(fromHSV(dh, min(ds, 0.18), 0.92), from: pill, need: 0.50)
+            muted = fromHSV(dh, min(ds, 0.22), 0.48)
+            if darkTone != nil {
+                let dark = fromHSV(dh, max(ds, 0.5), 0.35)
+                let hb = toOKLCH(base).h, hd = toOKLCH(dark).h
+                var gap = hd - hb
+                if gap > 180 { gap -= 360 }; if gap < -180 { gap += 360 }
+                if abs(gap) <= 45 {
+                    let step = max(-30, min(30, gap))
+                    let h = (hd + step + 360).truncatingRemainder(dividingBy: 360)
+                    accent = oklchFit(0.78, 0.14, h) ?? dark
+                    shiftedRing = oklchFit(0.72, 0.18, h) ?? dark
+                }
+            }
+        }
+        if light {
+            if contrast(pill, base) < 1.7 {
+                let o = toOKLCH(pill)
+                var L = o.L
+                while L > 0.0 {
+                    L -= 0.005
+                    if let x = oklchFit(L, o.C, o.h), contrast(x, base) >= 1.7 { pill = x; break }
+                }
+            }
+        } else {
+            let behind = strip.isEmpty ? [base] : strip
+            let skip = behind.count >= 8 ? 2 : 0
+            func worstVs(_ x: RGB) -> Double { behind.map { contrast(x, $0) }.sorted()[skip] }
+            let darkest = behind.map(relLum).sorted()[skip]
+            let o = toOKLCH(pill)
+            var cands: [(L: Double, x: RGB)] = []
+            var L = 0.10
+            while L <= 0.95 {
+                if let x = oklchFit(L, o.C, o.h), relLum(x) >= 0.012 { cands.append((L, x)) }
+                L += 0.005
+            }
+            func nearest(_ ok: (RGB) -> Bool) -> RGB? {
+                cands.filter { ok($0.x) }.min { abs($0.L - o.L) < abs($1.L - o.L) }?.x
+            }
+            if worstVs(pill) < 1.7 || relLum(pill) >= darkest {
+                if let x = nearest({ relLum($0) < darkest && worstVs($0) >= 1.7 }) { pill = x }
+                else if let x = nearest({ relLum($0) < darkest && worstVs($0) >= 1.5 }) { pill = x }
+                else if relLum(pill) >= darkest {
+                    let lighter = cands.filter { relLum($0.x) >= darkest && worstVs($0.x) >= 1.3 }
+                    if let x = lighter.min(by: { $0.L < $1.L })?.x { pill = x }
+                } else if worstVs(pill) < 1.3, let x = nearest({ worstVs($0) >= 1.3 }) { pill = x }
+            }
+        }
+
+        let accHSV = toHSV(accent)
+        if !light && V < 0.30 && baseH >= 140 && baseH <= 185 && accHSV.h >= 140 && accHSV.h <= 180 {
+            let ha = toOKLCH(accent).h
+            let h = ha + (160 - ha) * 0.5
+            accent = oklchFit(0.70, 0.10, h) ?? accent
+            shiftedRing = oklchFit(0.68, 0.11, h) ?? shiftedRing
+            let lo = toOKLCH(label)
+            label = oklchFit(lo.L, 0.04, warm?.hue ?? lo.h) ?? label
+            let mo = toOKLCH(muted)
+            muted = oklchFit(mo.L, min(mo.C, 0.04), mo.h) ?? muted
+            let behindL = (strip.isEmpty ? [base] : strip).map { toOKLCH($0).L }.sorted()
+            let shadow = darkTone.map { fromHSV($0.hue, max(min($0.sat, 0.55), 0.5), 0.35) } ?? base
+            let hs = toOKLCH(shadow).h
+            let pillC = min(0.05, max(0.02, 0.3 * (chroma ?? 0.1)))
+            pill = oklchFit(behindL[behindL.count / 2], pillC, hs + (160 - hs) * 0.5) ?? pill
+        }
+        accent = clearOf(accent, bar: base, pill: pill, preferUp: !light)
+        if !light {
+            let lo = toOKLCH(label)
+            let c = min(0.055, 0.6 * toOKLCH(accent).C)
+            label = oklchFit(0.85, max(c, lo.C), lo.h) ?? label
+        }
+        muted = towardLum(muted, (q8(pill).lum + q8(label).lum) / 2)
+        label = legible(label, against: [pill], ratio: 4.5)
+
+        var greyCap: Double? = nil
+        if let pc = chroma, pc < 0.07 {
+            let cap = max(0.05, 2.5 * pc)
+            greyCap = cap
+            let o = toOKLCH(accent)
+            if o.C > cap { accent = oklchFit(o.L, cap, o.h) ?? accent }
+        }
+
+        var surface = base
+        do {
+            let o = toOKLCH(pill)
+            let prefer = light ? toOKLCH(base).L : max(0.12, o.L - 0.12)
+            let C = min(o.C, 0.06)
+            func at(_ L: Double) -> RGB? { oklchFit(L, C, o.h) }
+            func score(_ x: RGB) -> Double {
+                min(contrast(label, x) / 7.0, contrast(muted, x) / 4.5, contrast(accent, x) / 3.0)
+            }
+            var pick: RGB? = nil, pickDist = 9.0, best: RGB? = nil, bestScore = 0.0
+            var L = 0.04
+            while L <= 0.98 {
+                if let x = at(L) {
+                    let sc = score(x)
+                    if sc >= 1 && abs(L - prefer) < pickDist { pick = x; pickDist = abs(L - prefer) }
+                    if sc > bestScore { best = x; bestScore = sc }
+                }
+                L += 0.01
+            }
+            surface = pick ?? best ?? base
+            if pick == nil {
+                label  = legible(label,  against: [pill, surface], ratio: 4.5)
+                muted  = legible(muted,  against: [surface], ratio: 4.5)
+                accent = legible(accent, against: [pill, surface], ratio: 3.0)
+            }
+        }
+        accent = legible(accent, against: [surface, pill], ratio: 3.0)
+
+        var ring = accent
+        if !low {
+            let ringS = min(max(0.45, tame), min(0.95, max(0.45, accentS * 1.20)))
+            ring = shiftedRing ?? fromHSV(accentH, ringS, light ? 0.86 : 0.94)
+            ring = brighten(ring, from: base, need: 0.10)
+        }
+
+        if let cap = greyCap {
+            let o = toOKLCH(ring)
+            if o.C > cap + 0.02 { ring = oklchFit(o.L, cap + 0.02, o.h) ?? ring }
+        }
+
+        let rh = toHSV(ring)
+        if rh.h >= 35 && rh.h <= 70 && rh.s > 0.65 { ring = fromHSV(rh.h, 0.65, rh.v) }
+
+        return Palette(bar: base, pill: pill, muted: muted, label: label, accent: accent, ring: ring,
+                       surface: surface,
+                       isLight: light, isLowChroma: low, hue: H, sat: S, val: V)
+    }
+}
+
+// The terminal formula of helper/term-palette.swift (the computed branch):
+// the 16 OMACOSY_P values from the bar roles. Ported verbatim so Magic and
+// the auto-theme pipeline open on the same colours.
+enum TermFormula {
+    struct C {
+        var r: Double, g: Double, b: Double
+
+        init(r: Double, g: Double, b: Double) { self.r = r; self.g = g; self.b = b }
+
+        init(hex: String) {
+            let v = ColorMath.hexUInt32(hex) ?? 0
+            self.init(r: Double((v >> 16) & 0xff) / 255,
+                      g: Double((v >> 8) & 0xff) / 255,
+                      b: Double(v & 0xff) / 255)
+        }
+
+        var hex: String { String(format: "#%02x%02x%02x", q(r), q(g), q(b)) }
+        func q(_ v: Double) -> Int { Int((min(1, max(0, v)) * 255).rounded()) }
+    }
+
+    static func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+    static func gam(_ v: Double) -> Double { v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055 }
+
+    static func toOK(_ c: C) -> (L: Double, C: Double, h: Double) {
+        let r = lin(c.r), g = lin(c.g), b = lin(c.b)
+        let l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        let m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        let s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        let L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+        let A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+        let B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        var h = atan2(B, A) * 180 / .pi; if h < 0 { h += 360 }
+        return (L, sqrt(A * A + B * B), h)
+    }
+
+    static func fromOK(_ L: Double, _ ch: Double, _ h: Double) -> C? {
+        let A = ch * cos(h * .pi / 180), B = ch * sin(h * .pi / 180)
+        let l = pow(L + 0.3963377774 * A + 0.2158037573 * B, 3)
+        let m = pow(L - 0.1055613458 * A - 0.0638541728 * B, 3)
+        let s = pow(L - 0.0894841775 * A - 1.2914855480 * B, 3)
+        let r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+        let g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+        let b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        let e = 0.001
+        guard r >= -e, r <= 1 + e, g >= -e, g <= 1 + e, b >= -e, b <= 1 + e else { return nil }
+        return C(r: gam(min(1, max(0, r))), g: gam(min(1, max(0, g))), b: gam(min(1, max(0, b))))
+    }
+
+    static func fit(_ L: Double, _ ch: Double, _ h: Double) -> C {
+        var c = ch
+        while c > 0 { if let x = fromOK(L, c, h) { return x }; c -= 0.005 }
+        return fromOK(L, 0, h) ?? C(r: 0, g: 0, b: 0)
+    }
+
+    static func relLum(_ c: C) -> Double { 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b) }
+
+    static func contrast(_ a: C, _ b: C) -> Double {
+        let x = relLum(a), y = relLum(b); return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+    }
+
+    static func legible(_ c: C, on bg: C, ratio: Double) -> C {
+        if contrast(c, bg) >= ratio { return c }
+        let o = toOK(c), up = relLum(bg) < 0.2
+        var L = o.L
+        while L > 0.02 && L < 0.99 {
+            L += up ? 0.01 : -0.01
+            let x = fit(L, o.C, o.h)
+            if contrast(x, bg) >= ratio { return x }
+        }
+        return up ? C(r: 1, g: 1, b: 1) : C(r: 0, g: 0, b: 0)
+    }
+
+    // term-palette.swift lines 138-193. Only accent, surface and label feed
+    // the 16 values; pill and muted are roles of the env, not of P0..P15.
+    static func palette(accent accentHex: String, surface: String, label: String) -> [String] {
+        var accent = C(hex: accentHex)
+        let lab = C(hex: label)
+        var bg = C(hex: surface)
+
+        let dark = relLum(lab) > 0.4
+        if contrast(lab, bg) < 8 {
+            let o = toOK(bg)
+            var L = o.L
+            while L > 0.03 && L < 0.99 {
+                L += dark ? -0.01 : 0.01
+                let x = fit(L, min(o.C, 0.05), o.h)
+                if contrast(lab, x) >= 8 { bg = x; break }
+                bg = x
+            }
+        }
+        accent = legible(accent, on: bg, ratio: 4.5)
+
+        let aOK = toOK(accent)
+        let base: [Double] = [29, 142, 95, 258, 328, 210]
+        func harmonised(_ h: Double) -> Double {
+            var d = aOK.h - h
+            if d > 180 { d -= 360 }; if d < -180 { d += 360 }
+            return h + max(-15, min(15, d))
+        }
+        let chroma = max(0.09, min(0.16, aOK.C * 1.2))
+        let normalL = dark ? 0.68 : 0.52, brightL = dark ? 0.80 : 0.62
+        let bgL = toOK(bg).L, bgC = min(toOK(bg).C, 0.03), bgH = toOK(bg).h
+
+        var ansi: [String] = []
+        ansi.append(fit(bgL + (dark ? 0.10 : -0.10), bgC, bgH).hex)
+        for h in base { ansi.append(legible(fit(normalL, chroma, harmonised(h)), on: bg, ratio: 4.5).hex) }
+        ansi.append(legible(lab, on: bg, ratio: 7).hex)
+        ansi.append(legible(fit(bgL + (dark ? 0.26 : -0.26), bgC, bgH), on: bg, ratio: 3.5).hex)
+        for h in base { ansi.append(legible(fit(brightL, chroma, harmonised(h)), on: bg, ratio: 4.5).hex) }
+        ansi.append(legible(lab, on: bg, ratio: 10).hex)
+        return ansi
+    }
+}
+
+// The bar roles of the auto-theme pipeline for one image: bar, pill, muted,
+// label, accent, ring and the solid surface, all lowercase hex.
+struct MagicRoles {
+    var bar: DerivePort.RGB
+    var pill: DerivePort.RGB
+    var muted: DerivePort.RGB
+    var label: DerivePort.RGB
+    var accent: DerivePort.RGB
+    var ring: DerivePort.RGB
+    var surface: DerivePort.RGB
+    var isLight: Bool
+    var isLowChroma: Bool
+
+    var ladder: String { isLight ? "light" : "dark" }
+}
+
+func magicRoles(url: URL) throws -> MagicRoles {
+    guard let base = DerivePort.baseColour(of: url) else {
+        throw ThemeError(message: "cannot decode image: \(url.path)")
+    }
+    let p = DerivePort.derive(
+        base,
+        picture: DerivePort.pictureColour(of: url),
+        darkTone: DerivePort.darkToneColour(of: url),
+        strip: DerivePort.stripSlices(of: url),
+        chroma: DerivePort.pictureChroma(of: url),
+        warm: DerivePort.warmToneColour(of: url))
+    return MagicRoles(bar: p.bar, pill: p.pill, muted: p.muted, label: p.label,
+                      accent: p.accent, ring: p.ring, surface: p.surface,
+                      isLight: p.isLight, isLowChroma: p.isLowChroma)
+}
+
+func magicPalette(url: URL, useCache: Bool = true) throws -> [String] {
+    let key = ExtractCache.key(path: url.path, light: false, mode: "magic")
+    if useCache, let key, let cached = ExtractCache.load(key) { return cached }
+
+    let roles = try magicRoles(url: url)
+    let palette = TermFormula.palette(accent: roles.accent.hex,
+                                      surface: roles.surface.hex,
+                                      label: roles.label.hex)
+    if useCache, let key { ExtractCache.save(key, palette) }
+    return palette
+}
+
+// MARK: bar roles
+
+struct BarRoles {
+    var bar: String
+    var pill: String
+    var muted: String
+    var label: String
+    var accent: String
+    var ring: String
+}
+
+// Maps any 16-colour palette onto the values the bar reads, holding the
+// floors of docs/derived-themes.md 4.4 (pill vs bar >= 0.085, label vs pill
+// >= 0.50, muted >= 0.18 from both, accent >= 0.28/0.20 from bar and pill,
+// ring >= 0.10 from the bar) and then checking the text at WCAG 4.5:1 and
+// the accent at 3:1. The blend loops are derive.swift's.
+func barRoles(_ colors: [String], accent accentHex: String) -> BarRoles {
+    if colors.count != 16 { fail("bar roles need exactly 16 colours") }
+    let p0 = DerivePort.RGB(hex: colors[0])
+    let p7 = DerivePort.RGB(hex: colors[7])
+    let p8 = DerivePort.RGB(hex: colors[8])
+    let accentSeed = DerivePort.RGB(hex: accentHex)
+    let light = p0.lum > 0.45
+
+    // Surface search (derive.swift): the bar tone in the pill's hue where
+    // the label reads at 7:1, muted at 4.5:1 and the accent at 3:1.
+    let pillLch = DerivePort.toOKLCH(p8)
+    let prefer = light ? DerivePort.toOKLCH(p0).L : max(0.12, pillLch.L - 0.12)
+    let chroma = min(pillLch.C, 0.06)
+    func at(_ l: Double) -> DerivePort.RGB? { DerivePort.oklchFit(l, chroma, pillLch.h) }
+    func score(_ x: DerivePort.RGB) -> Double {
+        min(DerivePort.contrast(p7, x) / 7.0,
+            DerivePort.contrast(p8, x) / 4.5,
+            DerivePort.contrast(accentSeed, x) / 3.0)
+    }
+    var bar = p0
+    var pick: DerivePort.RGB? = nil
+    var pickDist = 9.0
+    var best: DerivePort.RGB? = nil
+    var bestScore = 0.0
+    var l = 0.04
+    while l <= 0.98 {
+        if let x = at(l) {
+            let sc = score(x)
+            if sc >= 1 && abs(l - prefer) < pickDist { pick = x; pickDist = abs(l - prefer) }
+            if sc > bestScore { best = x; bestScore = sc }
+        }
+        l += 0.01
+    }
+    bar = pick ?? best ?? p0
+
+    // The pill and the label are built as a pair on the ladder's side: on a
+    // light bar the pill sits below it with a dark label under that; on a
+    // dark bar above it with a light label over it. The luminance targets
+    // leave the 0.085 and 0.50 floors room by construction, and the WCAG
+    // pass below only has to fine-tune.
+    let barL = DerivePort.q8(bar).lum
+    let up = !light
+    func separateDir(_ c: DerivePort.RGB, from ref: DerivePort.RGB, need: Double, up: Bool) -> DerivePort.RGB {
+        let lr = DerivePort.q8(ref).lum
+        if abs(DerivePort.q8(c).lum - lr) >= need { return c }
+        let target = up ? DerivePort.white : DerivePort.black
+        for step in 1...50 {
+            let cand = DerivePort.blend(c, toward: target, 0.02 * Double(step))
+            if abs(DerivePort.q8(cand).lum - lr) >= need { return cand }
+        }
+        return target
+    }
+
+    let pillL = light ? min(0.58, barL - 0.20) : min(0.20, max(barL + 0.10, 0.10))
+    var pill = DerivePort.towardLum(p8, pillL)
+    pill = separateDir(pill, from: bar, need: 0.085, up: up)
+    let labelL = light ? max(0.02, DerivePort.q8(pill).lum - 0.55)
+                       : min(0.98, DerivePort.q8(pill).lum + 0.55)
+    var label = DerivePort.towardLum(p7, labelL)
+    label = separateDir(label, from: pill, need: 0.50, up: up)
+    var muted = DerivePort.towardLum(p8, (DerivePort.q8(pill).lum + DerivePort.q8(label).lum) / 2)
+    var accent = DerivePort.clearOf(accentSeed, bar: bar, pill: pill, preferUp: !light)
+
+    // Text checks first, then the floors: separate() and clearOf() only move
+    // a colour further away, so re-flooring cannot give the contrast back.
+    func floorPass() {
+        if abs(DerivePort.q8(pill).lum - DerivePort.q8(bar).lum) < 0.085 {
+            pill = separateDir(pill, from: bar, need: 0.085, up: up)
+        }
+        if abs(DerivePort.q8(label).lum - DerivePort.q8(pill).lum) < 0.50 {
+            label = separateDir(label, from: pill, need: 0.50, up: up)
+        }
+        let lp = DerivePort.q8(pill).lum, ll = DerivePort.q8(label).lum
+        let lm = DerivePort.q8(muted).lum
+        if abs(lm - lp) < 0.18 || abs(lm - ll) < 0.18 {
+            muted = DerivePort.towardLum(muted, (lp + ll) / 2)
+        }
+        if abs(DerivePort.q8(accent).lum - DerivePort.q8(bar).lum) < 0.28 ||
+           abs(DerivePort.q8(accent).lum - DerivePort.q8(pill).lum) < 0.20 {
+            accent = DerivePort.clearOf(accent, bar: bar, pill: pill, preferUp: !light)
+        }
+    }
+
+    for _ in 0..<3 {
+        label = DerivePort.legible(label, against: [bar, pill], ratio: 4.5)
+        muted = DerivePort.legible(muted, against: [bar], ratio: 4.5)
+        accent = DerivePort.legible(accent, against: [bar, pill], ratio: 3.0)
+        floorPass()
+    }
+
+    let ring = DerivePort.brighten(accent, from: bar, need: 0.10)
+    return BarRoles(bar: bar.hex, pill: pill.hex, muted: muted.hex,
+                    label: label.hex, accent: accent.hex, ring: ring.hex)
+}
+
+// The Light/Dark suggestion: the same fill-crop band baseColour reads, before
+// the menu-bar transform, over the 0.5 luma line.
+func suggestMode(url: URL) throws -> String {
+    guard let mean = DerivePort.fillCropMean(of: url) else {
+        throw ThemeError(message: "cannot decode image: \(url.path)")
+    }
+    return mean.lum > 0.5 ? "light" : "dark"
 }
 
 // MARK: Pixel sampling
@@ -2525,6 +3960,49 @@ enum Wallpapers {
         return out.sorted { $0.path < $1.path }
     }
 
+    // Ported from Aether's wallpaper/local.go ScanDirectory: recursive,
+    // hidden directories and symlinked directories skipped, files in
+    // subfolders named by their path relative to the root.
+    struct ScannedWallpaper {
+        var path: String
+        var name: String
+        var size: Int64
+        var modTime: Int64
+        var key: String
+    }
+
+    static func scan(dir: String) -> [ScannedWallpaper] {
+        let fm = FileManager.default
+        let root = resolved(dir)
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        var out: [ScannedWallpaper] = []
+
+        func walk(_ directory: String) {
+            guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return }
+            for name in names.sorted() {
+                let path = (directory as NSString).appendingPathComponent(name)
+                if (try? fm.destinationOfSymbolicLink(atPath: path)) != nil { continue }
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+                if isDir.boolValue {
+                    if name.hasPrefix(".") { continue }
+                    walk(path)
+                    continue
+                }
+                guard imageExtensions.contains((name as NSString).pathExtension.lowercased()) else { continue }
+                let attrs = try? fm.attributesOfItem(atPath: path)
+                let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                let modTime = Int64((attrs?[.modificationDate] as? Date ?? Date(timeIntervalSince1970: 0))
+                    .timeIntervalSince1970)
+                let rel = path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : name
+                out.append(ScannedWallpaper(path: path, name: rel, size: size,
+                                            modTime: modTime, key: derivedKey(for: path)))
+            }
+        }
+        walk(root)
+        return out
+    }
+
     // Must equal omacosy-custom-theme's key: first 16 hex of SHA-1(path).
     static func derivedKey(for path: String) -> String {
         let digest = Insecure.SHA1.hash(data: Data(path.utf8))
@@ -2740,7 +4218,7 @@ func themeError(_ error: Error) -> Never {
 
 // MARK: - CLI
 
-let themecoreVersion = "0.3.0"
+let themecoreVersion = "0.4.0"
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write("omacosy-themecore: \(message)\n".data(using: .utf8)!)
@@ -2774,12 +4252,17 @@ func usage() -> Never {
            omacosy-themecore theme import <file> [--id ID] [--name NAME] [--replace|--rename] [--json]
            omacosy-themecore theme export <id> [--out PATH] [--json]
            omacosy-themecore wallpaper list [--dir DIR] [--json]
+           omacosy-themecore wallpaper scan [--dir DIR] [--json]
            omacosy-themecore wallpaper info <path> [--json]
            omacosy-themecore wallpaper rename <old> <new> [--json]
            omacosy-themecore wallpaper trash <path> [--json]
-           omacosy-themecore palette extract <image> [--mode ID] [--light] [--json]
+           omacosy-themecore palette extract <image> [--mode ID] [--light] [--no-cache] [--json]
            omacosy-themecore palette generate --colors CSV [--counts CSV|--weights CSV]
                                            [--mode ID] [--light] [--normalize] [--json]
+           omacosy-themecore palette magic <image> [--roles] [--no-cache] [--json]
+           omacosy-themecore palette roles --colors CSV [--accent HEX] [--json]
+           omacosy-themecore palette roles --image PATH [--mode ID] [--light] [--json]
+           omacosy-themecore palette suggest-mode <image> [--json]
            omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]
            omacosy-themecore palette analyze <op> ...
            omacosy-themecore image info <path> [--json]
@@ -3340,6 +4823,26 @@ case "wallpaper":
             exit(0)
         } catch { themeError(error) }
 
+    case "scan":
+        do {
+            let dirFlag = takeFlag("--dir")
+            noExtraArguments()
+            let dir = dirFlag.map { Wallpapers.resolved($0) } ?? Wallpapers.resolved(Wallpapers.configuredDir())
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
+                throw ThemeError(message: "wallpaper directory does not exist: \(dir)")
+            }
+            let entries = Wallpapers.scan(dir: dir)
+            if jsonOut {
+                printJSON(entries.map { entry in
+                    ["name": entry.name, "path": entry.path, "bytes": entry.size,
+                     "modTime": entry.modTime, "key": entry.key] as [String: Any]
+                })
+            }
+            for entry in entries { print(entry.name) }
+            exit(0)
+        } catch { themeError(error) }
+
     case "info":
         do {
             guard let raw = args.first else { throw ThemeError(message: "wallpaper info needs a path") }
@@ -3443,6 +4946,8 @@ case "palette":
             args.removeFirst()
             let mode = takeFlag("--mode") ?? "normal"
             let light = takeBool("--light")
+            let noCache = takeBool("--no-cache")
+            let canonical = takeBool("--canonical")
             noExtraArguments()
             guard extractionModeExists(mode) else { fail("unknown extraction mode: \(mode)") }
             let path = Wallpapers.resolved(raw)
@@ -3450,11 +4955,106 @@ case "palette":
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
                 throw ThemeError(message: "no such image: \(path)")
             }
-            let palette = try extractColors(url: URL(fileURLWithPath: path), light: light, mode: mode)
+            let palette = try extractColors(url: URL(fileURLWithPath: path), light: light,
+                                            mode: mode, useCache: !noCache,
+                                            canonicalOrder: canonical)
             if jsonOut {
                 printJSON(["path": path, "mode": mode, "light": light, "colors": palette])
             }
             palette.forEach { print($0) }
+            exit(0)
+        } catch { themeError(error) }
+
+    case "magic":
+        do {
+            guard let raw = args.first else { throw ThemeError(message: "palette magic needs an image path") }
+            args.removeFirst()
+            let rolesOnly = takeBool("--roles")
+            let noCache = takeBool("--no-cache")
+            noExtraArguments()
+            let path = Wallpapers.resolved(raw)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                throw ThemeError(message: "no such image: \(path)")
+            }
+            let url = URL(fileURLWithPath: path)
+            if rolesOnly {
+                let roles = try magicRoles(url: url)
+                let low = roles.isLowChroma ? "+lowchroma" : ""
+                if jsonOut {
+                    printJSON([
+                        "bar": roles.bar.hex, "pill": roles.pill.hex, "muted": roles.muted.hex,
+                        "label": roles.label.hex, "accent": roles.accent.hex, "ring": roles.ring.hex,
+                        "surface": roles.surface.hex, "ladder": roles.ladder, "lowChroma": roles.isLowChroma,
+                    ])
+                }
+                print("\(roles.bar.hex) \(roles.pill.hex) \(roles.muted.hex) \(roles.label.hex) "
+                    + "\(roles.accent.hex) \(roles.ring.hex) \(roles.surface.hex) \(roles.ladder)\(low) "
+                    + (path as NSString).lastPathComponent)
+                exit(0)
+            }
+            let palette = try magicPalette(url: url, useCache: !noCache)
+            if jsonOut {
+                printJSON(["path": path, "mode": "magic", "colors": palette])
+            }
+            palette.forEach { print($0) }
+            exit(0)
+        } catch { themeError(error) }
+
+    case "roles":
+        do {
+            let colorsRaw = takeFlag("--colors")
+            let imageRaw = takeFlag("--image")
+            let mode = takeFlag("--mode") ?? "normal"
+            let light = takeBool("--light")
+            let accentRaw = takeFlag("--accent")
+            noExtraArguments()
+            if colorsRaw != nil && imageRaw != nil {
+                fail("use either --colors or --image, not both")
+            }
+            guard extractionModeExists(mode) else { fail("unknown extraction mode: \(mode)") }
+            let colors: [String]
+            if let imageRaw {
+                let path = Wallpapers.resolved(imageRaw)
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                    throw ThemeError(message: "no such image: \(path)")
+                }
+                colors = try extractColors(url: URL(fileURLWithPath: path), light: light, mode: mode)
+            } else if let colorsRaw {
+                colors = hexListArgument(colorsRaw)
+                guard colors.count == 16 else { fail("bar roles need exactly 16 colours") }
+            } else {
+                fail("palette roles needs --colors CSV or --image PATH")
+            }
+            let accent = normalizedHex(accentRaw ?? colors[4])
+            let roles = barRoles(colors, accent: accent)
+            if jsonOut {
+                printJSON(["bar": roles.bar, "pill": roles.pill, "muted": roles.muted,
+                           "label": roles.label, "accent": roles.accent, "ring": roles.ring])
+            }
+            print("bar    \(roles.bar)")
+            print("pill   \(roles.pill)")
+            print("muted  \(roles.muted)")
+            print("label  \(roles.label)")
+            print("accent \(roles.accent)")
+            print("ring   \(roles.ring)")
+            exit(0)
+        } catch { themeError(error) }
+
+    case "suggest-mode":
+        do {
+            guard let raw = args.first else { throw ThemeError(message: "palette suggest-mode needs an image path") }
+            args.removeFirst()
+            noExtraArguments()
+            let path = Wallpapers.resolved(raw)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                throw ThemeError(message: "no such image: \(path)")
+            }
+            let mode = try suggestMode(url: URL(fileURLWithPath: path))
+            if jsonOut { printJSON(["path": path, "suggested": mode]) }
+            print(mode)
             exit(0)
         } catch { themeError(error) }
 

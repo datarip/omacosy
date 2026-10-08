@@ -115,6 +115,26 @@ OmniWM, `aerospace.toml` under AeroSpace). On each press it:
   hides the overlay. That event lands *after* macOS has painted, so no grace
   timer is needed either.
 
+**The real wallpaper is asked for by two mechanisms, not one.** `omacosy-helper
+wallpaper <path>` sets it through `NSWorkspace.setDesktopImageURL` (the public
+API, and the one whose choice macOS stores) **and** through System Events'
+`set picture`, the legacy AppleScript that `theme-set` and `theme-bg-next`
+already fall back to when the helper is not installed. They are independent, so
+a switch still lands when one of them breaks. This is not detection: both are
+asked every time, whichever works does the work, and on a healthy build the two
+agree. There is no retry, no poll and no new timer — the apply is a short-lived
+child process beside the API call, and the handoff watch above is unchanged
+because both mechanisms update the same `desktopImageURL` the watch reads.
+
+It exists because macOS **27.2 build 26B5101f** (the Beta 3 patch, seen
+2026-10-06) changed the wallpaper image extension: the public API returns
+success but the request is rejected (`WallpaperFoundation.WallpaperURLError
+(2)`, logged by `com.apple.wallpaper.extension.image`) and nothing moves. The
+picture still *seems* to change because the overlay above draws it; the lock
+screen and the first picture at boot keep the old one. Asking System Events as
+well restores the live picture on that build. See "Limitations" for the half it
+cannot restore.
+
 **Memory.** ImageIO leaks about 18 MB per decoded wallpaper on macOS 27.2
 (decoding the same image repeatedly grows the same way; a plain alloc/free
 loop plateaus, so it is real). The helper only keeps the current image, and
@@ -139,7 +159,8 @@ is crisp.
 - **External displays:** the same wallpaper fills each one, sharp, and a
   display plugged in while a switch is pending is covered the same way.
 - **Lock screen and login:** these show the **real** wallpaper, which is why
-  the real wallpaper is still applied. The preview window does not reach them.
+  the real wallpaper is still applied through both mechanisms. The preview
+  window does not reach them.
 
 ## 5. Limitations
 
@@ -147,6 +168,18 @@ is crisp.
   overlay simply stays on screen (which is visually correct — it shows the
   chosen wallpaper) and the log says the store was not found. There is no
   polling fallback by design.
+- **System Events needs the Automation (Apple Events) permission**, attributed
+  to whichever process sends the Apple event, and a rebuild can invalidate it —
+  the same class of nuisance as the accessibility grant. If it is denied, the
+  System Events half does nothing and a switch is back to the public API alone,
+  so it degrades rather than breaks.
+- **The public API is the only persisting mechanism.** System Events changes
+  the live picture but does **not** write the wallpaper store (measured on
+  27.2 build 26B5101f: the store's Desktop entry is unchanged 34 s after a
+  `set picture`). So on a build where the API is broken, the lock screen during
+  a session follows the live picture, but the picture stored for the next boot
+  is not updated by this fallback; only Apple fixing the API restores that
+  half.
 - The **terminal and its apps** are told at the same moment as the bar and the
   ring, but they are separate programs that must rewrite their configs and
   reload, so they settle about a second later.

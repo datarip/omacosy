@@ -11,7 +11,9 @@
 //                           browser chord asks this at press time
 //   default-app <scheme>    the bundle id of the app macOS opens <scheme>
 //                           with (e.g. mailto); bin/omacosy-open asks this
-//   wallpaper <path>        set the desktop picture on every screen
+//   wallpaper <path>        set the desktop picture on every screen, through
+//                           BOTH the public API and System Events (see
+//                           setPictureViaSystemEvents for why)
 //   wallpaper resync        put the recorded picture back on any screen
 //                           that shows an older omacosy picture
 //   audio list              output devices: "*<TAB>name" (current) / "-<TAB>name"
@@ -106,6 +108,48 @@ func ownedWallpaperRoots() -> [String] {
 func isOwnedWallpaper(_ url: URL, _ roots: [String]) -> Bool {
     let paths = [url.path, url.resolvingSymlinksInPath().path]
     return paths.contains { p in roots.contains { p.hasPrefix($0 + "/") } }
+}
+
+// Set the desktop picture through System Events, the same AppleScript
+// theme-set and theme-bg-next already fall back to when omacosy-helper is
+// not installed.
+//
+// WHY IT RUNS BESIDE THE PUBLIC API. `wallpaper <path>` first asks
+// NSWorkspace (the API macOS persists), then also asks this. They are two
+// independent mechanisms, so a switch still lands when one of them breaks.
+// It is needed here today: on macOS 27.2 build 26B5101f the API returns
+// success but the wallpaper image extension rejects the request
+// (WallpaperURLError 2) and nothing moves. The picture still seems to
+// change because the theme switch draws its own overlay window; away from
+// that window — the lock screen, the first picture at boot, Mission
+// Control — the old one shows. Asking both costs one short-lived child
+// process per apply and needs no detection, no retry and no poll: whichever
+// mechanism still works is the one that wins, and on a healthy build the
+// two agree.
+//
+// The path is passed as an ARGUMENT and never spliced into the script
+// text. A theme is third-party content, and a filename such as
+//   x" & (do shell script "…") & ".jpg
+// would otherwise close the AppleScript string and run. `osascript -`
+// reads the script from stdin and exposes the argument as `argv`, which
+// is the same guard the shell fallbacks use.
+func setPictureViaSystemEvents(_ path: String) {
+    let script = """
+    on run argv
+      tell application "System Events" to tell every desktop to set picture to (item 1 of argv)
+    end run
+    """
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-", path]
+    let stdinPipe = Pipe()
+    p.standardInput = stdinPipe
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return }
+    stdinPipe.fileHandleForWriting.write(Data(script.utf8))
+    try? stdinPipe.fileHandleForWriting.close()
+    p.waitUntilExit()
 }
 
 // --- CoreAudio ---------------------------------------------------------
@@ -328,6 +372,11 @@ case "wallpaper":
         do { try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:]) }
         catch { failures += 1 }
     }
+    // The second, independent mechanism. The API above is the one macOS
+    // persists; this one still moves the picture on builds where the API
+    // silently fails. Both, every time, with no detection: see
+    // setPictureViaSystemEvents for the full reason.
+    setPictureViaSystemEvents(args[2])
     exit(failures == 0 ? 0 : 1)
 
 case "nightshift":

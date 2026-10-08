@@ -7,7 +7,10 @@
 #   omacosy-custom-theme dir             print the wallpaper directory, or exit 1
 #   omacosy-custom-theme current         print the LOGICAL name of the current theme
 #   omacosy-custom-theme list            print its images, sorted, or exit 1
-#   omacosy-custom-theme theme <image>   print the derived theme dir, building it if needed
+#   omacosy-custom-theme theme <image>   print the theme dir: the wallpaper's
+#                                        primary edition when one is saved,
+#                                        else the derived dir, built if needed
+#   omacosy-custom-theme theme --raw <image>   force the derived dir
 #   omacosy-custom-theme path <dir>      point the custom theme somewhere else
 #   omacosy-custom-theme day <spec>      what to show in the light appearance
 #   omacosy-custom-theme night <spec>    what to show in the dark appearance
@@ -30,6 +33,8 @@ DEFAULT_DIR="$HOME/Pictures/wallpapers"
 DERIVED="$HOME/.local/state/omacosy/derived"
 DERIVE_BIN="$HOME/.local/bin/omacosy-derive"
 CUSTOM_INDEX="$HOME/.local/state/omacosy/custom-index"
+MATERIALISED="$HOME/.local/state/omacosy/studio/materialised"
+THEMECORE="$HOME/.local/bin/omacosy-themecore"
 # resolve through the ~/.local/bin symlink to the real repo
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 THEMES_DIR="$REPO_DIR/themes"
@@ -116,9 +121,23 @@ cmd_list() {
 # real change, which is the reload notification the bar and the borders
 # daemon watch for with kqueue.
 cmd_theme() {
-  local img="$1"
+  local img="$1" raw="${2:-}"
   [ -f "$img" ] || { echo "omacosy-custom-theme: no such image: $img" >&2; return 1; }
   img="$(cd "$(dirname "$img")" && pwd)/$(basename "$img")"
+
+  # A saved edition wins over the auto-derived palette: themecore returns
+  # the primary edition's materialised directory for this wallpaper. No
+  # record is the normal case for most wallpapers — themecore exits 1 and
+  # the derived path below runs unchanged. --raw skips the query entirely.
+  if [ "$raw" != raw ] && [ -x "$THEMECORE" ]; then
+    local edition
+    if edition="$("$THEMECORE" theme materialize --wallpaper "$img" 2>/dev/null)" \
+       && [ -n "$edition" ] && [ -d "$edition" ]; then
+      printf '%s\n' "$edition"
+      return 0
+    fi
+  fi
+
   local key; key="$(printf '%s' "$img" | shasum -a 1 | cut -c1-16)"
   local out="$DERIVED/$key"
   if [ ! -f "$out/sketchybar.sh" ] || [ ! -f "$out/borders.sh" ] || [ "$img" -nt "$out/sketchybar.sh" ]; then
@@ -136,16 +155,27 @@ cmd_theme() {
 }
 
 # Which theme is showing, by LOGICAL name. A derived theme's directory is
-# named after a hash, so basename() alone would answer with that hash.
-# Read from the symlink rather than from a state file: theme-set would
-# have to write that file on the stock path, and anything that repoints
-# the symlink without going through theme-set would leave it stale.
+# named after a hash, and a materialised edition's after <id>-<rev>, so
+# basename() alone would answer with a hash. Read from the symlink rather
+# than from a state file: theme-set would have to write that file on the
+# stock path, and anything that repoints the symlink without going through
+# theme-set would leave it stale.
 cmd_current() {
   local t
   t="$(readlink "$HOME/.config/omarchy/current/theme" 2>/dev/null)" || return 1
   [ -n "$t" ] || return 1
   case "$t" in
     "$DERIVED"/*) printf 'custom\n' ;;
+    "$MATERIALISED"/*)
+      # studio/materialised/<id>-<rev>: the revision is the last dash
+      # segment and always 12 hex characters, so the id before it — dashes
+      # and all — is recovered exactly.
+      local base; base="$(basename "$t")"
+      if [[ "$base" =~ ^(.+)-[0-9a-f]{12}$ ]]; then
+        printf 'theme:%s\n' "${BASH_REMATCH[1]}"
+      else
+        printf 'custom\n'
+      fi ;;
     *)            printf '%s\n' "$(basename "$t")" ;;
   esac
 }
@@ -335,7 +365,11 @@ case "${1:-status}" in
   dir)      cmd_dir ;;
   current)  cmd_current ;;
   list)     cmd_list ;;
-  theme)    shift; cmd_theme "${1:-}" ;;
+  theme)    shift
+            case "${1:-}" in
+              --raw) shift; cmd_theme "${1:-}" raw ;;
+              *)     cmd_theme "${1:-}" ;;
+            esac ;;
   path)     shift; cmd_path "${1:-}" ;;
   day)      shift; cmd_day_night day "${1:-}" ;;
   night)    shift; cmd_day_night night "${1:-}" ;;

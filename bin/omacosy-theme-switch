@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|off] — switch a
-# theme instantly and in sync. Super+Shift+T and Super+Shift+B call this.
+# omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|
+#                       set-theme <theme.json>|set-raw <wallpaper>|off]
+# — switch a theme instantly and in sync. Super+Shift+T and Super+Shift+B
+# call this; the dashboard calls set-theme for a saved edition and set-raw
+# for a plain wallpaper.
 #
 # Why it exists. theme-set changes the theme symlink first (the bar and the
 # ring repaint in ~15ms) and only then asks macOS for the wallpaper, which
@@ -23,6 +26,7 @@ CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
 AUTO_THEME="$REPO_DIR/bin/omacosy-auto-theme"
 HELPER="$HOME/.local/bin/omacosy-helper"
 OVERLAY_BIN="$HOME/.local/bin/omacosy-overlay"
+THEMECORE="$HOME/.local/bin/omacosy-themecore"
 
 STATE_DIR="$HOME/.local/state/omacosy"
 CURRENT_LINK="$HOME/.config/omarchy/current/theme"
@@ -44,6 +48,14 @@ mkdir -p "$STATE_DIR"
 log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG"; }
 
 have_custom() { [ -x "$CUSTOM" ] && "$CUSTOM" dir >/dev/null 2>&1; }
+# Does the wallpaper list name the same file (by inode) as $1?
+list_has_file() {
+  local f
+  while IFS= read -r f; do
+    [ "$f" -ef "$1" ] && return 0
+  done < <("$CUSTOM" list)
+  return 1
+}
 stock_themes() { for t in "$THEMES_DIR"/*/; do basename "$t"; done; }
 bgs_of() {
   find -L "$1" -maxdepth 1 -type f \
@@ -94,8 +106,54 @@ ensure_overlay() {
   nohup "$OVERLAY_BIN" >/dev/null 2>&1 &
 }
 
+# The bookkeeping a switch leaves behind. $3 is the source wallpaper when
+# the caller knows it: an edition's display image is its media copy, but
+# custom-index must keep naming the source so theme-set and day/night can
+# route back to the edition.
+record_switch() {
+  local logical="$1" wall="$2" index="$3"
+  printf '%s\n' "$logical" > "$PENDING_THEME"
+  printf '%s\n' "$wall" > "$PENDING_WALL"
+  ln -nsf "$wall" "$BACKGROUND_LINK"
+  case "$logical" in
+    custom)  printf '%s\n' "${index:-$wall}" > "$CUSTOM_INDEX" ;;
+    theme:*) [ -n "$index" ] && printf '%s\n' "$index" > "$CUSTOM_INDEX" ;;
+    *)       printf '%s\n' "$logical" > "$LAST_STOCK" ;;
+  esac
+}
+
+# The terminal and its apps follow the SAME moment as the bar: they only
+# need the theme directory, which is already relinked. A saved edition is
+# applied from its own directory (its colors.toml); the plain custom theme
+# recomputes from the wallpaper. The previous apply is stopped so a burst
+# does not stack dozens of them.
+apply_apps() {
+  local logical="$1" theme_dir="$2"
+  kill "$(cat "$APPLY_PID" 2>/dev/null || true)" 2>/dev/null || true
+  if [ "${logical#theme:}" != "$logical" ]; then
+    ( "$AUTO_THEME" apply-theme "$theme_dir" "$logical" >/dev/null 2>&1 || true ) &
+  else
+    ( "$AUTO_THEME" apply "$logical" >/dev/null 2>&1 || true ) &
+  fi
+  echo $! > "$APPLY_PID"
+}
+
 show_overlay_then_relink() {
-  local wall="$1" theme_dir="$2" logical="$3" i ack="$STATE_DIR/overlay-ack"
+  local wall="$1" theme_dir="$2" logical="$3" index="${4:-}" i ack="$STATE_DIR/overlay-ack"
+
+  # An unchanged re-apply is a TRUE no-op. The materialised revision hash
+  # means the same directory covers identical colours; re-creating the
+  # ~/.config/omarchy/current/theme symlink would still write the watched
+  # directory (ln removes and recreates, even for the same target) and the
+  # bar and the ring would repaint the palette already on screen. Refresh
+  # the bookkeeping and the apps, skip the overlay and the link.
+  if [ "$(readlink "$CURRENT_LINK" 2>/dev/null || true)" = "$theme_dir" ]; then
+    record_switch "$logical" "$wall" "$index"
+    apply_apps "$logical" "$theme_dir"
+    log "no-op $logical -> $theme_dir"
+    return 0
+  fi
+
   [ -p "$ack" ] || { rm -f "$ack"; mkfifo "$ack" 2>/dev/null || true; }
   # read-write open never blocks, and gives the helper a reader to signal.
   exec 8<>"$ack" 2>/dev/null || true
@@ -112,17 +170,8 @@ show_overlay_then_relink() {
   done
   exec 8>&- 2>/dev/null || true
   ln -sfn "$theme_dir" "$CURRENT_LINK"
-  printf '%s\n' "$logical" > "$PENDING_THEME"
-  printf '%s\n' "$wall" > "$PENDING_WALL"
-  ln -nsf "$wall" "$BACKGROUND_LINK"
-  if [ "$logical" = custom ]; then printf '%s\n' "$wall" > "$CUSTOM_INDEX"
-  else printf '%s\n' "$logical" > "$LAST_STOCK"; fi
-  # The terminal and its apps follow the SAME moment as the bar: they only
-  # need the theme directory, which is already relinked. The previous apply
-  # is stopped so a burst does not stack dozens of them.
-  kill "$(cat "$APPLY_PID" 2>/dev/null || true)" 2>/dev/null || true
-  ( "$AUTO_THEME" apply "$logical" >/dev/null 2>&1 || true ) &
-  echo $! > "$APPLY_PID"
+  record_switch "$logical" "$wall" "$index"
+  apply_apps "$logical" "$theme_dir"
   schedule_settle "$logical" "$wall"
 }
 
@@ -153,12 +202,16 @@ case "$mode" in
     while IFS= read -r t; do list+=("$t"); done < <(stock_themes)
     have_custom && list+=(custom)
     cur="$(current_logical)"
+    # A saved edition (theme:<id>) is not a cycle entry: for T and B it
+    # counts as plain custom, which is where both cycles continue from it.
+    cur_bucket="$cur"
+    case "$cur_bucket" in theme:*) cur_bucket=custom ;; esac
 
     if [ "$mode" = theme ]; then
-      logical="$(printf '%s\n' "${list[@]}" | next_string "$cur")"
+      logical="$(printf '%s\n' "${list[@]}" | next_string "$cur_bucket")"
       [ -n "$logical" ] || logical="${list[0]}"
     else
-      logical="$cur"
+      logical="$cur_bucket"
       [ -n "$logical" ] || logical="${list[0]}"
     fi
 
@@ -166,6 +219,12 @@ case "$mode" in
     if [ "$logical" = custom ]; then
       dir="$("$CUSTOM" dir)"
       if [ "$mode" = wallpaper ]; then
+        # An edition displays its media copy, which is not a list entry;
+        # the remembered source is the true position then, or B would wrap
+        # to the first wallpaper instead of moving on from the edition.
+        if [ -n "$curwall" ] && ! list_has_file "$curwall" && [ -f "$CUSTOM_INDEX" ]; then
+          curwall="$(cat "$CUSTOM_INDEX")"
+        fi
         wall="$("$CUSTOM" list | next_file "$curwall")"
       else
         wall="$(cat "$PENDING_WALL" 2>/dev/null || true)"
@@ -173,6 +232,15 @@ case "$mode" in
       fi
       [ -n "$wall" ] && [ -f "$wall" ] || wall="$("$CUSTOM" list | head -1)"
       theme_dir="$("$CUSTOM" theme "$wall")" || exit 1
+      source_wall="$wall"
+      # An edition's directory shows its own image (the edited render when
+      # there is one), not the source file the list named; the directory's
+      # backgrounds link is authoritative either way.
+      shown="$(find -L "$theme_dir/backgrounds" -maxdepth 1 -type f 2>/dev/null | sort | head -1)"
+      # resolve past the materialised directory's own link: the background
+      # pointer must name the image, not a revision folder that may be pruned
+      [ -n "$shown" ] && wall="$(readlink -f "$shown" 2>/dev/null || true)"
+      [ -n "$wall" ] || wall="$shown"
     else
       theme_dir="$THEMES_DIR/$logical"
       if [ "$mode" = wallpaper ]; then
@@ -184,7 +252,7 @@ case "$mode" in
     fi
 
     log "switch $mode -> $logical / $(basename "$wall")"
-    show_overlay_then_relink "$wall" "$theme_dir" "$logical"
+    show_overlay_then_relink "$wall" "$theme_dir" "$logical" "${source_wall:-}"
     ;;
 
   set)
@@ -194,11 +262,41 @@ case "$mode" in
       dir="$("$CUSTOM" dir)"
       [ -n "$wall" ] || wall="$(cat "$CUSTOM_INDEX" 2>/dev/null || "$CUSTOM" list | head -1)"
       theme_dir="$("$CUSTOM" theme "$wall")" || exit 1
+      source_wall="$wall"
+      # an edition shows its own image, not the source the index named
+      shown="$(find -L "$theme_dir/backgrounds" -maxdepth 1 -type f 2>/dev/null | sort | head -1)"
+      # resolve past the materialised directory's own link: the background
+      # pointer must name the image, not a revision folder that may be pruned
+      [ -n "$shown" ] && wall="$(readlink -f "$shown" 2>/dev/null || true)"
+      [ -n "$wall" ] || wall="$shown"
     else
       theme_dir="$THEMES_DIR/$logical"
       [ -n "$wall" ] || wall="$(bgs_of "$theme_dir/backgrounds" | head -1)"
     fi
-    show_overlay_then_relink "$wall" "$theme_dir" "$logical"
+    show_overlay_then_relink "$wall" "$theme_dir" "$logical" "${source_wall:-}"
+    ;;
+
+  set-theme)
+    json="${1:?usage: omacosy-theme-switch set-theme <theme.json>}"
+    # Materialise first: an invalid JSON, or an edition whose image is gone,
+    # fails here and touches neither the desktop nor the symlink.
+    dir="$("$THEMECORE" theme materialize "$json")" || exit 1
+    wall="$("$THEMECORE" theme wallpaper "$json")" || exit 1
+    source="$("$THEMECORE" theme wallpaper "$json" --source 2>/dev/null || true)"
+    # <id>-<rev>; removing the shortest dash suffix strips exactly the
+    # revision, whatever dashes the id itself carries.
+    base="$(basename "$dir")"
+    id="${base%-*}"
+    log "switch set-theme -> theme:$id / $(basename "$wall")"
+    show_overlay_then_relink "$wall" "$dir" "theme:$id" "$source"
+    ;;
+
+  set-raw)
+    wall="${1:?usage: omacosy-theme-switch set-raw <wallpaper>}"
+    [ -f "$wall" ] || { echo "omacosy-theme-switch: no such image: $wall" >&2; exit 1; }
+    dir="$("$CUSTOM" theme --raw "$wall")" || exit 1
+    log "switch set-raw -> custom / $(basename "$wall")"
+    show_overlay_then_relink "$wall" "$dir" custom "$wall"
     ;;
 
   off)
@@ -207,7 +305,7 @@ case "$mode" in
     ;;
 
   *)
-    echo "usage: omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|off]" >&2
+    echo "usage: omacosy-theme-switch [theme|wallpaper|set <name> [wallpaper]|set-theme <theme.json>|set-raw <wallpaper>|off]" >&2
     exit 2
     ;;
 esac

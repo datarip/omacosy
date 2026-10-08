@@ -19,7 +19,15 @@ mkdir -p "$STATE_DIR"
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
 
-on_custom() { [ -x "$CUSTOM" ] && [ "$("$CUSTOM" current 2>/dev/null || true)" = custom ]; }
+# custom is the wallpaper-computed theme; theme:<id> is a saved named edition
+# of one. Both recolor through the same code path here.
+on_custom() {
+  [ -x "$CUSTOM" ] || return 1
+  case "$("$CUSTOM" current 2>/dev/null || true)" in
+    custom|theme:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # On the custom theme a wallpaper IS a theme, so the colours have to be
 # recomputed and the daemons told. They watch ~/.config/omarchy/current

@@ -18,6 +18,8 @@
 //   omacosy-themecore theme duplicate <id> [--id ID] [--name NAME]
 //   omacosy-themecore theme import <file> [--id ID] [--name NAME] [--replace|--rename]
 //   omacosy-themecore theme export <id> [--out PATH]
+//   omacosy-themecore theme materialize <id|file.json> [--wallpaper IMAGE] [--json]
+//   omacosy-themecore theme wallpaper <id|file.json> [--source] [--json]
 //   omacosy-themecore wallpaper list [--dir DIR] [--json]
 //   omacosy-themecore wallpaper info <path> [--json]
 //   omacosy-themecore wallpaper rename <old> <new> [--json]
@@ -39,9 +41,8 @@
 //
 // A PURE CLI: no AppKit, no UI, no permissions. Everything the Theme Studio
 // editors need that is not drawing lives here, so the dashboard only calls a
-// process and reads its answer. Phase 1: colour maths, adjustments, presets,
-// modes, theme records and the library; extraction and materialising arrive
-// in later phases.
+// process and reads its answer. Phases 1-3: colour maths, adjustments,
+// presets, modes, theme records, the library, extraction and materialising.
 //
 // The library lives in ~/.config/omacosy/themes/<id>.json; the test harness
 // redirects it and the Omacosy state files with OMACOSY_CONFIG_DIR,
@@ -3894,6 +3895,177 @@ struct ThemeLibrary {
     }
 }
 
+// MARK: - Materialise
+
+// Turns a stored theme record into a runnable theme directory. The bar, the
+// ring and the terminal pipeline read DIRECTORIES through
+// ~/.config/omarchy/current/theme, never a JSON file, so an edition becomes
+// usable only once it has been materialised into the same shape the stock
+// themes have:
+//
+//   sketchybar.sh   the bar palette (barRoles + the semantic trio)
+//   borders.sh      the focus ring's two colours
+//   colors.toml     omarchy's 22-key palette, for the terminal pipeline
+//   backgrounds/    one symlink to the edition's own image
+//   preview.png     a small thumbnail of that image
+//
+// The directory is named <id>-<rev>, where `rev` is a short content hash of
+// everything that shapes those files. An unchanged re-apply therefore lands
+// on the same directory the live symlink already points at, and the bar and
+// the ring get no kqueue event and repaint nothing; one changed colour means
+// a new revision, a new symlink target and exactly one real event. That is
+// the whole point of the hash. A new directory is built beside its final
+// name and renamed into place, so a reader never sees half a theme.
+enum Materialise {
+    static let semanticDark  = ["RED": "0xffe05f5f", "GREEN": "0xff6fcf87", "YELLOW": "0xffe5c736"]
+    static let semanticLight = ["RED": "0xff9d1f1f", "GREEN": "0xff1f7a3a", "YELLOW": "0xff8a6d00"]
+
+    // "#7aa2f7" -> "0xff7aa2f7", the 0xAARRGGBB spelling the bar and the
+    // ring parse. barRoles returns the bare hex; both spellings are accepted.
+    static func argb(_ hex: String) -> String {
+        "0xff" + (hex.hasPrefix("#") ? hex.dropFirst() : Substring(hex))
+    }
+
+    // The plan's revision hash: palette, extended colours, resolved mode (it
+    // picks the semantic trio), media, blur, edited flag and the app
+    // overrides. `name` is deliberately absent: renaming an edition must not
+    // repaint the desktop.
+    static func revision(of theme: Theme) -> String {
+        var parts: [String] = []
+        parts.append(theme.palette.colors.joined(separator: ","))
+        let ext = theme.palette.extended
+        parts.append([ext.accent, ext.cursor, ext.selectionForeground, ext.selectionBackground]
+            .joined(separator: ","))
+        parts.append(theme.palette.resolvedMode)
+        parts.append(theme.wallpaper.media ?? "")
+        parts.append(theme.wallpaper.blur ? "1" : "0")
+        parts.append(theme.wallpaper.edited ? "1" : "0")
+        for app in theme.appOverrides.keys.sorted() {
+            let roles = theme.appOverrides[app]!
+            parts.append(app + ":" + roles.keys.sorted().map { "\($0)=\(roles[$0]!)" }.joined(separator: ","))
+        }
+        let digest = SHA256.hash(data: Data(parts.joined(separator: "|").utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(12))
+    }
+
+    // The edition's own image: the snapshot in theme-media when it is still
+    // there, the recorded provenance path as the fallback. When media is an
+    // edited render, that render is what the directory must show.
+    static func liveImage(of theme: Theme, library: ThemeLibrary) throws -> URL {
+        if let media = theme.wallpaper.media, !media.isEmpty, !media.hasPrefix("."),
+           media.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\")) == nil {
+            let url = library.mediaDir.appendingPathComponent(media)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        if let path = theme.wallpaper.path, !path.isEmpty {
+            let url = URL(fileURLWithPath: Wallpapers.resolved(path))
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        throw ThemeError(message: "theme \"\(theme.id)\" has no image: media \(theme.wallpaper.media ?? "(none)") is missing and \(theme.wallpaper.path ?? "(no path)") does not exist")
+    }
+
+    static func materialize(_ theme: Theme, library: ThemeLibrary) throws -> URL {
+        let image = try liveImage(of: theme, library: library)
+        let rev = revision(of: theme)
+        let dir = library.materialisedDir.appendingPathComponent("\(theme.id)-\(rev)")
+        // An unchanged theme is already on disk: return the same directory
+        // without touching a byte, so the live symlink target does not move.
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("sketchybar.sh").path) {
+            return dir
+        }
+        try? FileManager.default.createDirectory(at: library.materialisedDir, withIntermediateDirectories: true)
+        let tmp = library.materialisedDir
+            .appendingPathComponent(".\(theme.id)-\(rev).tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.removeItem(at: tmp)
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            try writeArtifacts(theme, image: image, to: tmp)
+            if FileManager.default.fileExists(atPath: dir.path) {
+                // Lost a race against another writer: the winner is complete.
+                try? FileManager.default.removeItem(at: tmp)
+            } else {
+                try FileManager.default.moveItem(at: tmp, to: dir)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
+        }
+        return dir
+    }
+
+    static func writeArtifacts(_ theme: Theme, image: URL, to dir: URL) throws {
+        let roles = barRoles(theme.palette.colors, accent: theme.palette.extended.accent)
+        let sem = theme.palette.resolvedMode == "light" ? semanticLight : semanticDark
+
+        var sb = "#!/usr/bin/env bash\n"
+        sb += "# generated by omacosy-themecore from theme \(theme.id)\n"
+        sb += "export BAR_BG_SOLID=\(argb(roles.bar))\n"
+        sb += "export BAR_COLOR=\(argb(roles.bar))\n"
+        sb += "export ITEM_BG=\(argb(roles.pill))\n"
+        sb += "export MUTED=\(argb(roles.muted))\n"
+        sb += "export LABEL_COLOR=\(argb(roles.label))\n"
+        sb += "export ICON_COLOR=\(argb(roles.label))\n"
+        sb += "export ACCENT=\(argb(roles.accent))\n"
+        for key in ["RED", "GREEN", "YELLOW"] { sb += "export \(key)=\(sem[key]!)\n" }
+
+        var bd = "#!/usr/bin/env bash\n"
+        bd += "# generated by omacosy-themecore from theme \(theme.id)\n"
+        bd += "export ACTIVE_COLOR=\(argb(roles.ring))\n"
+        bd += "export INACTIVE_COLOR=\(argb(roles.pill))\n"
+
+        let ext = theme.palette.extended
+        var toml = ""
+        toml += "accent = \"\(ext.accent)\"\n"
+        toml += "cursor = \"\(ext.cursor)\"\n"
+        toml += "foreground = \"\(theme.palette.colors[7])\"\n"
+        toml += "background = \"\(theme.palette.colors[0])\"\n"
+        toml += "selection_foreground = \"\(ext.selectionForeground)\"\n"
+        toml += "selection_background = \"\(ext.selectionBackground)\"\n"
+        for i in 0..<16 { toml += "color\(i) = \"\(theme.palette.colors[i])\"\n" }
+
+        try sb.write(to: dir.appendingPathComponent("sketchybar.sh"), atomically: true, encoding: .utf8)
+        try bd.write(to: dir.appendingPathComponent("borders.sh"), atomically: true, encoding: .utf8)
+        try toml.write(to: dir.appendingPathComponent("colors.toml"), atomically: true, encoding: .utf8)
+
+        let backgroundDir = dir.appendingPathComponent("backgrounds", isDirectory: true)
+        try FileManager.default.createDirectory(at: backgroundDir, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: backgroundDir.appendingPathComponent(image.lastPathComponent), withDestinationURL: image)
+
+        try writeThumbnail(from: image, to: dir.appendingPathComponent("preview.png"))
+    }
+
+    // A small PNG for the Themes tab, written without decoding the full
+    // picture: ImageIO hands back a downsampled thumbnail.
+    static func writeThumbnail(from image: URL, to dest: URL, maxPixel: Int = 640) throws {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let src = CGImageSourceCreateWithURL(image as CFURL, nil),
+              let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary),
+              let out = CGImageDestinationCreateWithURL(dest as CFURL, "public.png" as CFString, 1, nil) else {
+            throw ThemeError(message: "cannot make a preview of \(image.path)")
+        }
+        CGImageDestinationAddImage(out, thumb, nil)
+        guard CGImageDestinationFinalize(out) else {
+            throw ThemeError(message: "cannot write \(dest.path)")
+        }
+    }
+}
+
+// Loads a theme by library id, or from a JSON file when the argument is a
+// path instead. `theme materialize` and `theme wallpaper` accept either.
+func loadThemeArgument(_ raw: String, library: ThemeLibrary) throws -> Theme {
+    if library.exists(id: raw) { return try library.load(id: raw) }
+    let path = Wallpapers.resolved(raw)
+    guard FileManager.default.fileExists(atPath: path) else {
+        throw ThemeError(message: "no theme \"\(raw)\" in \(library.dir.path), and no such file: \(path)")
+    }
+    return try library.load(url: URL(fileURLWithPath: path))
+}
+
 // MARK: - Wallpaper files
 
 enum Wallpapers {
@@ -4218,7 +4390,7 @@ func themeError(_ error: Error) -> Never {
 
 // MARK: - CLI
 
-let themecoreVersion = "0.4.0"
+let themecoreVersion = "0.5.0"
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write("omacosy-themecore: \(message)\n".data(using: .utf8)!)
@@ -4251,6 +4423,8 @@ func usage() -> Never {
            omacosy-themecore theme duplicate <id> [--id ID] [--name NAME] [--json]
            omacosy-themecore theme import <file> [--id ID] [--name NAME] [--replace|--rename] [--json]
            omacosy-themecore theme export <id> [--out PATH] [--json]
+           omacosy-themecore theme materialize <id|file.json> [--wallpaper IMAGE] [--json]
+           omacosy-themecore theme wallpaper <id|file.json> [--source] [--json]
            omacosy-themecore wallpaper list [--dir DIR] [--json]
            omacosy-themecore wallpaper scan [--dir DIR] [--json]
            omacosy-themecore wallpaper info <path> [--json]
@@ -4544,6 +4718,79 @@ case "theme":
             noExtraArguments()
             let theme = try library.load(id: id)
             FileHandle.standardOutput.write(try theme.canonicalData())
+            exit(0)
+        } catch { themeError(error) }
+
+    case "materialize":
+        do {
+            let wallpaperFlag = takeFlag("--wallpaper")
+            let raw = args.first
+            if raw != nil { args.removeFirst() }
+            noExtraArguments()
+            let theme: Theme
+            if let path = wallpaperFlag {
+                // The routing query omacosy-custom-theme asks: the primary
+                // edition for a wallpaper, or the earliest remaining one as
+                // the defensive fallback when no primary is flagged.
+                // Both sides resolve through symlinks so a /tmp spelling and
+                // a /private/tmp spelling of one file still match.
+                let resolved = URL(fileURLWithPath: Wallpapers.resolved(path))
+                    .resolvingSymlinksInPath().path
+                var warnings: [String] = []
+                let group = library.loadAll(warnings: &warnings).filter { theme in
+                    guard let recorded = theme.wallpaper.path else { return false }
+                    return URL(fileURLWithPath: Wallpapers.resolved(recorded))
+                        .resolvingSymlinksInPath().path == resolved
+                }
+                for warning in warnings { warn(warning) }
+                let pick = group.first(where: { $0.primary })
+                    ?? group.sorted { ($0.created ?? "", $0.id) < ($1.created ?? "", $1.id) }.first
+                guard let found = pick else {
+                    throw ThemeError(message: "no theme is recorded for \(resolved)")
+                }
+                theme = found
+            } else if let raw {
+                theme = try loadThemeArgument(raw, library: library)
+            } else {
+                throw ThemeError(message: "theme materialize needs an id, a JSON file or --wallpaper <image>")
+            }
+            let image = try Materialise.liveImage(of: theme, library: library)
+            let dir = try Materialise.materialize(theme, library: library)
+            let dirPath = dir.path
+            if jsonOut {
+                let payload: [String: Any] = ["id": theme.id, "dir": dirPath,
+                                              "rev": Materialise.revision(of: theme),
+                                              "wallpaper": image.path,
+                                              "source": theme.wallpaper.path ?? NSNull()]
+                printJSON(payload)
+            }
+            print(dirPath)
+            exit(0)
+        } catch { themeError(error) }
+
+    case "wallpaper":
+        do {
+            let sourceFlag = takeBool("--source")
+            guard let raw = args.first else {
+                throw ThemeError(message: "theme wallpaper needs an id or a JSON file")
+            }
+            args.removeFirst()
+            noExtraArguments()
+            let theme = try loadThemeArgument(raw, library: library)
+            if sourceFlag {
+                guard let path = theme.wallpaper.path, !path.isEmpty else {
+                    throw ThemeError(message: "theme \"\(theme.id)\" records no source path")
+                }
+                print(Wallpapers.resolved(path))
+                exit(0)
+            }
+            let image = try Materialise.liveImage(of: theme, library: library)
+            if jsonOut {
+                let payload: [String: Any] = ["id": theme.id, "path": image.path,
+                                              "source": theme.wallpaper.path ?? NSNull()]
+                printJSON(payload)
+            }
+            print(image.path)
             exit(0)
         } catch { themeError(error) }
 

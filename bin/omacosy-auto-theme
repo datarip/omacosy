@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]|enabled] — whether the
-# desktop and its apps take their colours from your own wallpapers. No args =
-# status.
+# omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]|
+#                     apply-theme <dir> [<label>]|enabled]
+# — whether the desktop and its apps take their colours from your own
+# wallpapers. No args = status.
 #
 # OFF BY DEFAULT. On a new install there is no custom theme and nothing is
 # recoloured: the four stock themes are all there is. `on` does two things:
@@ -737,12 +738,22 @@ repaint() {
   to_ttys "$osc"
 }
 
-on_custom() { [ -x "$CUSTOM" ] && [ "$("$CUSTOM" current 2>/dev/null || true)" = custom ]; }
+# custom is the wallpaper-computed theme; theme:<id> is a saved named
+# edition of one — both are custom themes as far as the apps are concerned.
+on_custom() {
+  [ -x "$CUSTOM" ] || return 1
+  case "$("$CUSTOM" current 2>/dev/null || true)" in
+    custom|theme:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-# A custom theme is on screen: its palette goes to every app.
+# A custom theme is on screen: its palette goes to every app. $2 is the
+# theme directory when the caller already knows it (apply-theme); without
+# it the live symlink answers.
 theme_apps() {
-  local label="$1" dir cmd
-  dir="$(theme_dir)" || return 0
+  local label="$1" dir="${2:-}" cmd
+  [ -n "$dir" ] || dir="$(theme_dir)"
   [ -n "$dir" ] || return 0
   [ -x "$BIN" ] || return 0
 
@@ -819,6 +830,19 @@ cmd_apply() {
   exit 0
 }
 
+# apply-theme <dir> [label] — the apps follow a materialised edition. The
+# directory is explicit, so this does not depend on the live symlink having
+# been swapped already; the palette comes from the directory's colors.toml
+# (omacosy-term-palette's stock branch), not from a wallpaper. `applier`
+# and `apps = off` behave exactly as they do on any custom theme.
+cmd_apply_theme() {
+  [ "$(setting)" = on ] || exit 0
+  local dir="${1:-}" label="${2:-theme}"
+  [ -n "$dir" ] && [ -d "$dir" ] || { echo "omacosy-auto-theme: apply-theme needs a theme directory" >&2; exit 1; }
+  if [ "$(apps_setting)" = on ]; then theme_apps "$label" "$dir"; else clear_apps "$label"; fi
+  exit 0
+}
+
 stock_count() { local n=0 t; for t in "$THEMES_DIR"/*/; do n=$((n+1)); done; echo "$n"; }
 
 cmd_on() {
@@ -887,15 +911,22 @@ cmd_status() {
   else
     echo "custom theme : hidden while auto-theme is off"
   fi
-  if [ "$now" = custom ]; then
-    if [ "$(apps_setting)" = on ]; then
-      echo "on screen    : custom — the apps follow the wallpaper"
-    else
-      echo "on screen    : custom — the desktop follows the wallpaper, the apps do not"
-    fi
-  else
-    echo "on screen    : $now — a stock theme, the apps show their own colours"
-  fi
+  case "$now" in
+    custom)
+      if [ "$(apps_setting)" = on ]; then
+        echo "on screen    : custom — the apps follow the wallpaper"
+      else
+        echo "on screen    : custom — the desktop follows the wallpaper, the apps do not"
+      fi ;;
+    theme:*)
+      if [ "$(apps_setting)" = on ]; then
+        echo "on screen    : $now — an edition of a custom theme, the apps follow it"
+      else
+        echo "on screen    : $now — an edition of a custom theme, the apps do not follow it"
+      fi ;;
+    *)
+      echo "on screen    : $now — a stock theme, the apps show their own colours" ;;
+  esac
   echo "applier      : ${cmd:-omacosy (writes the config itself)}"
   echo "palette      : $([ -f "$PALETTE" ] && echo "$PALETTE" || echo none)"
   echo "btop         : $([ -f "$BTOP_OUT" ] && echo "$BTOP_OUT" || echo "its own theme")"
@@ -912,9 +943,10 @@ case "${1:-status}" in
   off)     cmd_off ;;
   status)  cmd_status ;;
   apply)   shift; cmd_apply "${1:-omacosy}" ;;
+  apply-theme) shift; cmd_apply_theme "${1:-}" "${2:-theme}" ;;
   # quiet, for omacosy-custom-theme: exit 0 when the custom theme may exist
   enabled) [ "$(setting)" = on ] ;;
   # run by tmux from tmux-theme.conf: the bar's band takes the terminal's background
   tmux-bar) shift; cmd_tmux_bar "${1:-}" ;;
-  *) echo "usage: omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]]" >&2; exit 2 ;;
+  *) echo "usage: omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]|apply-theme <dir> [<label>]]" >&2; exit 2 ;;
 esac

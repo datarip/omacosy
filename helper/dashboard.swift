@@ -465,30 +465,41 @@ final class SegmentedView: NSView {
 
 final class ButtonView: NSView {
     var title = "Save" { didSet { needsDisplay = true } }
-    var fontSize: CGFloat = 13
+    var fontSize: CGFloat = 12
     // icon buttons centre on the glyph's own box; text buttons centre on cap
     // height, which reads better for words
     var centeredByBounds = false
+    // a quieter fill for the second action in a dialog or footer row
+    var secondary = false { didSet { needsDisplay = true } }
     var busy = false { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
 
     override func draw(_ dirtyRect: NSRect) {
         let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
-        (busy ? palette.muted : palette.accent).setFill()
-        r.fill()
+        if secondary && !busy {
+            palette.itemBG.withAlphaComponent(0.35).setFill()
+            r.fill()
+            palette.muted.withAlphaComponent(0.35).setStroke()
+            r.lineWidth = 1
+            r.stroke()
+        } else {
+            (busy ? palette.muted : palette.accent).setFill()
+            r.fill()
+        }
         let text = busy ? "Saving…" : title
         let font = nerdFont("Bold", fontSize)
+        let ink = (secondary && !busy) ? palette.label : palette.barBG
         if centeredByBounds {
             // centre on the glyph's ink, not its line box: nerd-font icons
             // carry odd metrics and drift high/left in a line-box centre
             guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-            let line = textLine(text, font, palette.barBG)
-            let ink = CTLineGetImageBounds(line, ctx)
-            ctx.textPosition = CGPoint(x: bounds.midX - ink.midX,
-                                       y: bounds.midY - ink.midY)
+            let line = textLine(text, font, ink)
+            let inkBounds = CTLineGetImageBounds(line, ctx)
+            ctx.textPosition = CGPoint(x: bounds.midX - inkBounds.midX,
+                                       y: bounds.midY - inkBounds.midY)
             CTLineDraw(line, ctx)
         } else {
-            drawMidCenter(text, font, palette.barBG,
+            drawMidCenter(text, font, ink,
                           centerX: bounds.midX, midTop: bounds.height / 2, height: bounds.height)
         }
     }
@@ -716,7 +727,7 @@ final class OptionsTabView: NSView, ScrollStepTab {
 
     override func layout() {
         super.layout()
-        let saveW: CGFloat = 110, saveH: CGFloat = 32
+        let saveW: CGFloat = 96, saveH: CGFloat = 24
         saveButton.frame = NSRect(x: (bounds.width - saveW) / 2,
                                   y: (bottomBarH - saveH) / 2, width: saveW, height: saveH)
         let scrollH = max(0, bounds.height - bottomBarH)
@@ -1345,7 +1356,7 @@ final class WorkspaceRowView: NSView {
     private let chipScroll = NSScrollView()
     private let chipStrip: ChipStrip
     private let labelW: CGFloat = 120
-    private let addW: CGFloat = 86
+    private let addW: CGFloat = 96
 
     init(ws: String, assigned: [String], allApps: [AppInfo]) {
         self.ws = ws
@@ -1354,7 +1365,6 @@ final class WorkspaceRowView: NSView {
         self.chipStrip = ChipStrip(allApps: allApps)
         super.init(frame: .zero)
         addButton.title = "＋ Add App"
-        addButton.fontSize = 12
         addButton.onClick = { [weak self] in self?.showMenu() }
         addSubview(addButton)
         chipScroll.hasHorizontalScroller = true
@@ -1504,7 +1514,7 @@ final class WorkspaceRowView: NSView {
         if v {
             let stripX = labelW + 8
             chipScroll.frame = NSRect(x: stripX, y: 0,
-                                      width: max(0, bounds.width - stripX - 96 - 8),
+                                      width: max(0, bounds.width - stripX - addW - 8),
                                       height: bounds.height)
             chipStrip.assigned = assigned
             chipStrip.frame = NSRect(x: 0, y: 0,
@@ -1695,7 +1705,7 @@ final class WorkspacesTabView: NSView, ScrollStepTab {
         let segSize = screenSeg.sizeThatFits()
         screenSeg.frame = NSRect(x: 0, y: bounds.height - 2 - segSize.height,
                                  width: min(segSize.width, bounds.width), height: segSize.height)
-        let saveW: CGFloat = 110, saveH: CGFloat = 32
+        let saveW: CGFloat = 96, saveH: CGFloat = 24
         saveButton.frame = NSRect(x: (bounds.width - saveW) / 2,
                                   y: (bottomBarH - saveH) / 2, width: saveW, height: saveH)
         // a whole number of rows: on first open the list sits at the top, so
@@ -2003,6 +2013,10 @@ func parseColorsToml(_ path: String) -> [NSColor] {
         v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         map[String(k)] = v
     }
+    let ansi = (0...15).map { "color\($0)" }
+    if ansi.allSatisfy({ map[$0] != nil }) {
+        return ansi.compactMap { map[$0].flatMap(hexColor) }
+    }
     let order = ["background", "accent", "color1", "color2", "color3", "color4", "color5", "color6"]
     return order.compactMap { map[$0].flatMap(hexColor) }
 }
@@ -2026,10 +2040,27 @@ func parseSketchybar(_ path: String) -> [NSColor] {
 
 // derive-on-first-use for a custom wallpaper; cached by its derived dir
 func customPalette(_ wallpaper: String) -> [NSColor] {
-    let (code, out) = shell("\(HOME)/.local/bin/omacosy-custom-theme theme \(shellQuote(wallpaper)) 2>/dev/null")
+    let (code, out) = shell("\(HOME)/.local/bin/omacosy-custom-theme theme --raw \(shellQuote(wallpaper)) 2>/dev/null")
     guard code == 0 else { return [] }
     let dir = out.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init) ?? ""
     guard !dir.isEmpty else { return [] }
+    // the full 16 ANSI colours the editor seeds from (same helper, same
+    // milliseconds); the bar's 8-role summary is the fallback
+    let envFile = NSTemporaryDirectory()
+        + "omacosy-cell-palette-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString).env"
+    let (tc, _) = shell("\(HOME)/.local/bin/omacosy-term-palette \(shellQuote(dir)) \(shellQuote(envFile)) >/dev/null 2>&1")
+    var byIndex: [Int: NSColor] = [:]
+    if tc == 0, let text = try? String(contentsOfFile: envFile, encoding: .utf8) {
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0].hasPrefix("OMACOSY_P"),
+                  let i = Int(parts[0].dropFirst(9)) else { continue }
+            let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+            if let col = hexColor(value) { byIndex[i] = col }
+        }
+    }
+    try? FileManager.default.removeItem(atPath: envFile)
+    if byIndex.count == 16 { return (0..<16).compactMap { byIndex[$0] } }
     return parseSketchybar(dir + "/sketchybar.sh")
 }
 
@@ -2397,7 +2428,11 @@ final class ThemesTabView: NSView, ScrollStepTab {
         }
         grid.onEdit = { [weak self] cell in
             guard let self, let w = self.window else { return }
-            ThemeEditor.present(cell: cell, from: w)
+            ThemeEditor.present(cell: cell, from: w) { [weak self] message in
+                self?.status = message
+                self?.needsDisplay = true
+                self?.onApplied?()
+            }
         }
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(visibleChanged),
@@ -2732,6 +2767,13 @@ struct EditorAdjustments {
             let text = f.step < 1 ? String(format: "%.1f", v) : String(format: "%.0f", v)
             return "\(f.cli) \(text)"
         }.joined(separator: " ")
+    }
+
+    // the record's spelling of every value
+    var values: [String: Double] {
+        var out: [String: Double] = [:]
+        for f in Self.fields { out[f.key] = self[f.key] }
+        return out
     }
 
     static func format(_ v: Double, _ step: Double) -> String {
@@ -4689,8 +4731,7 @@ final class PaletteBuilderDoc: NSView {
             sliders.append(s)
             addSubview(s)
         }
-        resetButton.title = "Reset Adjustments"
-        resetButton.fontSize = 12
+        resetButton.title = "Reset"
         addSubview(resetButton)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -4752,7 +4793,7 @@ final class PaletteBuilderDoc: NSView {
             top += AdjustmentSliderView.rowHeight
         }
         top += 8
-        resetButton.frame = rect(top: top, h: 26, x: insetL, w: 150)
+        resetButton.frame = rect(top: top, h: 24, x: insetL, w: 96)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -4915,7 +4956,7 @@ final class PaletteCanvasDoc: NSView {
         var h: CGFloat = 12
         h += 26                                             // "Palette 16 colors · …"
         h += PaletteCardsView.height(for: 16)
-        h += 20                                             // hint line
+        h += 36                                             // spaced hint line
         h += 26                                             // "Semantic Colors"
         h += SemanticSectionView.height()
         h += 12
@@ -4933,8 +4974,8 @@ final class PaletteCanvasDoc: NSView {
         top += 26
         colorCards.frame = rect(top: top, h: PaletteCardsView.height(for: 16), x: insetL, w: contentW)
         top += PaletteCardsView.height(for: 16)
-        hintTop = top + 2
-        top += 20
+        hintTop = top + 12
+        top += 36
         semanticTop = top
         top += 26
         semantic.frame = rect(top: top, h: SemanticSectionView.height(), x: insetL, w: contentW)
@@ -4957,14 +4998,68 @@ final class PaletteCanvasDoc: NSView {
     }
 }
 
-final class ThemeEditorView: NSView {
+// --- editor footer ----------------------------------------------------------
+
+// Save / Save As / Apply, and the one place unsaved changes are announced.
+final class EditorFooterView: NSView {
+    let saveButton = ButtonView()
+    let saveAsButton = ButtonView()
+    let applyButton = ButtonView()
+    var dirty = false { didSet { needsDisplay = true } }
+    var message: (text: String, red: Bool)? { didSet { needsDisplay = true } }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        saveAsButton.title = "Save As…"
+        saveAsButton.secondary = true
+        saveButton.title = "Save"
+        applyButton.title = "Apply Theme"
+        addSubview(saveAsButton)
+        addSubview(saveButton)
+        addSubview(applyButton)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layout() {
+        super.layout()
+        let margin: CGFloat = 16
+        let w: CGFloat = 96, h: CGFloat = 24
+        let y = (bounds.height - h) / 2
+        applyButton.frame = NSRect(x: bounds.width - margin - w, y: y, width: w, height: h)
+        saveButton.frame = NSRect(x: applyButton.frame.minX - 8 - w, y: y, width: w, height: h)
+        saveAsButton.frame = NSRect(x: saveButton.frame.minX - 8 - w, y: y, width: w, height: h)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        palette.muted.withAlphaComponent(0.25).setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        if let message {
+            drawMidLeft(message.text, nerdFont("Regular", 11),
+                        message.red ? .systemRed : palette.muted,
+                        x: 20, midTop: bounds.height / 2, height: bounds.height)
+        } else if dirty {
+            let dot = NSRect(x: 20, y: bounds.midY - 3, width: 6, height: 6)
+            palette.accent.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            drawMidLeft("Unsaved changes", nerdFont("Regular", 11), palette.muted,
+                        x: 32, midTop: bounds.height / 2, height: bounds.height)
+        }
+    }
+}
+
+final class ThemeEditorView: NSView, NSTextFieldDelegate {
     var onClose: (() -> Void)?
+    var onNameEdit: (() -> Void)?
     var displayName = "" { didSet { needsDisplay = true } }
+    var dirty = false { didSet { footer.dirty = dirty } }
+    let nameField = NSTextField()
     let paletteBuilder = PaletteBuilderView()
     let paletteCanvas = PaletteCanvasView()
     let wallpaperEditor = EditorColumnView()
+    let footer = EditorFooterView()
 
     private let headerH: CGFloat = 56
+    private let footerH: CGFloat = 54
     private let leftW: CGFloat = 320
     private let rightW: CGFloat = 340
     private let closeSize: CGFloat = 24
@@ -4972,11 +5067,44 @@ final class ThemeEditorView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wallpaperEditor.title = "Wallpaper Editor"
+        nameField.isBezeled = false
+        nameField.drawsBackground = true
+        nameField.backgroundColor = palette.itemBG.withAlphaComponent(0.25)
+        nameField.textColor = palette.label
+        nameField.font = nerdFont("Bold", 14)
+        nameField.focusRingType = .none
+        nameField.usesSingleLineMode = true
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.delegate = self
+        nameField.target = self
+        nameField.action = #selector(nameReturn)
+        addSubview(nameField)
         addSubview(paletteBuilder)
         addSubview(paletteCanvas)
         addSubview(wallpaperEditor)
+        addSubview(footer)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    var nameValue: String {
+        nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    func setName(_ name: String) { nameField.stringValue = name }
+
+    @objc private func nameReturn() { window?.makeFirstResponder(self) }
+    func controlTextDidChange(_ obj: Notification) { onNameEdit?() }
+
+    // a theme name is not prose: the field editor's red dotted spell
+    // underline reads as a rendering bug in the header
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard let editor = obj.userInfo?["NSFieldEditor"] as? NSTextView else { return }
+        editor.isContinuousSpellCheckingEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isGrammarCheckingEnabled = false
+    }
 
     private var closeRect: NSRect {
         NSRect(x: bounds.width - closeSize - 16,
@@ -4986,10 +5114,18 @@ final class ThemeEditorView: NSView {
 
     override func layout() {
         super.layout()
-        let h = max(0, bounds.height - headerH)
-        paletteBuilder.frame = NSRect(x: 0, y: 0, width: leftW, height: h)
-        paletteCanvas.frame = NSRect(x: leftW, y: 0, width: max(0, bounds.width - leftW - rightW), height: h)
-        wallpaperEditor.frame = NSRect(x: bounds.width - rightW, y: 0, width: rightW, height: h)
+        let h = max(0, bounds.height - headerH - footerH)
+        paletteBuilder.frame = NSRect(x: 0, y: footerH, width: leftW, height: h)
+        paletteCanvas.frame = NSRect(x: leftW, y: footerH,
+                                     width: max(0, bounds.width - leftW - rightW), height: h)
+        wallpaperEditor.frame = NSRect(x: bounds.width - rightW, y: footerH, width: rightW, height: h)
+        footer.frame = NSRect(x: 0, y: 0, width: bounds.width, height: footerH)
+        // the name field is the whole title — no static prefix (the editor
+        // is obvious from its contents); -14 centres the cell-drawn text on
+        // the header's mid line — NSTextField lays text out from the frame
+        // top, not on cap height
+        nameField.frame = NSRect(x: 20, y: bounds.height - headerH / 2 - 14,
+                                 width: max(120, closeRect.minX - 16 - 20), height: 22)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -5003,17 +5139,15 @@ final class ThemeEditorView: NSView {
         body.lineWidth = 1
         body.stroke()
 
-        drawMidLeft("Theme Editor — \(displayName)", nerdFont("Bold", 14), palette.label,
-                    x: 20, midTop: headerH / 2, height: bounds.height)
         drawMidCenter("✕", nerdFont("Regular", 12), palette.muted,
                       centerX: closeRect.midX, midTop: headerH / 2, height: bounds.height)
 
         // column rules, drawn last so they sit on every surface
         palette.muted.withAlphaComponent(0.25).setFill()
         NSRect(x: 0, y: bounds.height - headerH, width: bounds.width, height: 1).fill()
-        let columnH = max(0, bounds.height - headerH)
-        NSRect(x: leftW, y: 0, width: 1, height: columnH).fill()
-        NSRect(x: bounds.width - rightW, y: 0, width: 1, height: columnH).fill()
+        let columnH = max(0, bounds.height - headerH - footerH)
+        NSRect(x: leftW, y: footerH, width: 1, height: columnH).fill()
+        NSRect(x: bounds.width - rightW, y: footerH, width: 1, height: columnH).fill()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -5035,20 +5169,29 @@ final class ThemeEditor {
     private let root: ThemeEditorView
     private let subject: EditorSubject
     private let model = PaletteModel()
+    private let status: ((String) -> Void)?
     private var keyMonitor: Any?
+    private var messageWork: DispatchWorkItem?
     // what the later panels read: the edition's stored record, or the
     // draft's Magic seed
     private(set) var record: [String: Any]?
     // set on any user change; Save/Apply clear it
     private(set) var dirty = false
 
-    private init(subject: EditorSubject, size: NSSize) {
+    private init(subject: EditorSubject, size: NSSize, status: ((String) -> Void)?) {
         self.subject = subject
+        self.status = status
         root = ThemeEditorView(frame: NSRect(origin: .zero, size: size))
         window = EditorWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: .borderless, backing: .buffered, defer: false)
         root.displayName = subject.displayName
+        root.setName(subject.displayName)
         root.onClose = { [weak self] in self?.close() }
+        root.onNameEdit = { [weak self] in
+            guard let self else { return }
+            self.dirty = true
+            self.root.dirty = true
+        }
         root.paletteBuilder.model = model
         root.paletteCanvas.model = model
         model.onUpdate = { [weak self] in
@@ -5056,7 +5199,14 @@ final class ThemeEditor {
             self.root.paletteBuilder.sync()
             self.root.paletteCanvas.sync()
         }
-        model.onUserEdit = { [weak self] in self?.dirty = true }
+        model.onUserEdit = { [weak self] in
+            guard let self else { return }
+            self.dirty = true
+            self.root.dirty = true
+        }
+        root.footer.saveButton.onClick = { [weak self] in self?.startSave(newID: false, action: .none) }
+        root.footer.saveAsButton.onClick = { [weak self] in self?.startSave(newID: true, action: .none) }
+        root.footer.applyButton.onClick = { [weak self] in self?.startSave(newID: false, action: .apply) }
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -5069,22 +5219,23 @@ final class ThemeEditor {
     // The Edit pill's front door. A named variation opens its saved record;
     // a raw Wallpaper #N always starts a fresh draft seeded from its Magic
     // palette — Customize never replaces an existing variation.
-    static func present(cell: ThemeCell, from host: NSWindow) {
+    static func present(cell: ThemeCell, from host: NSWindow, status: ((String) -> Void)? = nil) {
         guard let dash = host as? DashboardWindow else { return }
         if let id = cell.editionID, let e = allEditions().first(where: { $0.id == id }) {
-            openEditor(.edition(e), from: dash)
+            openEditor(.edition(e), from: dash, status: status)
             return
         }
-        openEditor(.draft(wallpaper: cell.wallpaper), from: dash)
+        openEditor(.draft(wallpaper: cell.wallpaper), from: dash, status: status)
     }
 
-    private static func openEditor(_ subject: EditorSubject, from dash: DashboardWindow) {
+    private static func openEditor(_ subject: EditorSubject, from dash: DashboardWindow,
+                                   status: ((String) -> Void)?) {
         current?.close()
         let screen = dash.screen ?? NSScreen.main
         let frame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let w = min(1280, frame.width - 80)
         let h = min(800, frame.height - 80)
-        let editor = ThemeEditor(subject: subject, size: NSSize(width: w, height: h))
+        let editor = ThemeEditor(subject: subject, size: NSSize(width: w, height: h), status: status)
         current = editor
         editor.window.setFrameOrigin(NSPoint(x: frame.midX - w / 2, y: frame.midY - h / 2))
         // the editor owns the session: outside clicks and the toggle key
@@ -5114,6 +5265,137 @@ final class ThemeEditor {
         return true
     }
 
+    // --- save / apply -------------------------------------------------------
+
+    private enum SaveAction { case none, apply }
+
+    private func startSave(newID: Bool, action: SaveAction) {
+        let name = root.nameValue
+        guard !name.isEmpty else {
+            showMessage("Give the theme a name.", red: true)
+            return
+        }
+        let base = saveBase(newID: newID)
+        root.footer.saveButton.busy = true
+        root.footer.saveAsButton.busy = true
+        root.footer.message = nil
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (error, fresh) = self.runSave(base: base, name: name, newID: newID)
+            DispatchQueue.main.async {
+                self.root.footer.saveButton.busy = false
+                self.root.footer.saveAsButton.busy = false
+                if let error {
+                    self.showMessage(error, red: true)
+                } else if let fresh {
+                    self.didSave(fresh, action: action)
+                }
+            }
+        }
+    }
+
+    // The record skeleton, built on the main thread so a save in flight
+    // never reads the model while an edit is running.
+    private func saveBase(newID: Bool) -> [String: Any] {
+        var top: [String: Any]
+        if let rec = record {
+            top = rec
+            if newID {
+                top["schema"] = rec["schema"] ?? 1
+                top["primary"] = rec["primary"] ?? true
+                top.removeValue(forKey: "id")
+                top.removeValue(forKey: "created")
+                top.removeValue(forKey: "updated")
+            }
+        } else {
+            top = ["schema": 1, "primary": true, "favorite": false,
+                   "wallpaper": ["path": model.imagePath, "source": "local",
+                                 "blur": false, "edited": false]]
+        }
+        top["palette"] = palettePayload()
+        return top
+    }
+
+    private func palettePayload() -> [String: Any] {
+        var extended: [String: String] = [:]
+        for slot in PaletteModel.extendedKeys {
+            extended[slot.key] = model.extendedHex[slot.key] ?? "#000000"
+        }
+        return ["method": model.method, "mode": model.mode, "resolvedMode": model.resolvedMode,
+                "colors": model.baseColors, "extended": extended,
+                "locked": model.locked.sorted(),
+                "adjustments": model.adjustments.values, "curve": model.curve]
+    }
+
+    private func runSave(base: [String: Any], name: String, newID: Bool)
+        -> (error: String?, record: [String: Any]?) {
+        var top = base
+        top["name"] = name
+        let tmp = NSTemporaryDirectory()
+            + "omacosy-editor-save-\(ProcessInfo.processInfo.processIdentifier).json"
+        guard let data = try? JSONSerialization.data(withJSONObject: top, options: [.sortedKeys]),
+              (try? data.write(to: URL(fileURLWithPath: tmp))) != nil else {
+            return ("Couldn't prepare the theme file.", nil)
+        }
+        let (code, out) = shell("\(themecoreBin()) theme save \(shellQuote(tmp)) --json 2>&1")
+        try? FileManager.default.removeItem(atPath: tmp)
+        guard code == 0, let od = out.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: od)) as? [String: Any],
+              let id = obj["id"] as? String else {
+            if out.lowercased().contains("already exists") {
+                return ("A theme named “\(name)” already exists. Choose another name.", nil)
+            }
+            return ("Couldn't save the theme. Try again.", nil)
+        }
+        let (sc, so) = shell("\(themecoreBin()) theme show \(shellQuote(id)) 2>/dev/null")
+        if sc == 0, let fresh = (try? JSONSerialization.jsonObject(with: Data(so.utf8))) as? [String: Any] {
+            return (nil, fresh)
+        }
+        var fallback = top
+        fallback["id"] = id
+        return (nil, fallback)
+    }
+
+    private func didSave(_ fresh: [String: Any], action: SaveAction) {
+        record = fresh
+        dirty = false
+        root.dirty = false
+        let name = fresh["name"] as? String ?? root.nameValue
+        if action == .apply, let id = fresh["id"] as? String {
+            performApply(id: id, name: name)
+        } else {
+            finish(with: "Saved \(name)")
+        }
+    }
+
+    // a finished write hands the dashboard a line of status and steps out
+    private func finish(with message: String) {
+        let report = status
+        close()
+        report?(message)
+    }
+
+    private func showMessage(_ text: String, red: Bool, seconds: Double = 4) {
+        messageWork?.cancel()
+        root.footer.message = (text, red)
+        let work = DispatchWorkItem { [weak self] in self?.root.footer.message = nil }
+        messageWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    private func performApply(id: String, name: String) {
+        root.footer.applyButton.busy = true
+        DispatchQueue.global().async { [weak self] in
+            let json = HOME + "/.config/omacosy/themes/" + id + ".json"
+            _ = shell("\(HOME)/.local/bin/omacosy-theme-switch set-theme \(shellQuote(json))")
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.root.footer.applyButton.busy = false
+                self.finish(with: "Applied \(name)")
+            }
+        }
+    }
+
     private func show() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -5123,6 +5405,11 @@ final class ThemeEditor {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
             guard let self, e.window === self.window else { return e }
             if e.keyCode == 53 {
+                // Esc while the name is being edited ends that first
+                if self.root.nameField.currentEditor() != nil {
+                    self.root.window?.makeFirstResponder(self.root)
+                    return nil
+                }
                 // Esc peels one layer at a time: selection, then the edited
                 // colour, then the editor itself
                 if self.model.clearSelection() { return nil }
@@ -5151,9 +5438,11 @@ final class ThemeEditor {
                     image = wobj["path"] as? String ?? ""
                 }
                 DispatchQueue.main.async {
-                    self?.record = rec
+                    guard let self else { return }
+                    self.record = rec
+                    if let name = rec["name"] as? String, !name.isEmpty { self.root.setName(name) }
                     guard !image.isEmpty else { return }
-                    self?.model.seedEdition(record: rec, image: image)
+                    self.model.seedEdition(record: rec, image: image)
                 }
             }
         case .draft(let wallpaper):
@@ -5261,10 +5550,11 @@ final class StorageTabView: NSView {
     private let chooseButton = ButtonView()
     private var dir = ""
     private var status = ""
-    // three buttons right-aligned as one group, in the compact size the
-    // Options/Workspaces "Add App" buttons use: font 12, 24 high
-    private let chooseW: CGFloat = 86
-    private let addW: CGFloat = 86
+    // three buttons right-aligned as one group; every text button in the
+    // dashboard shares one compact size (96×24, font 12 — the chips and
+    // segmented controls' scale), the folder glyph keeps its icon width
+    private let chooseW: CGFloat = 96
+    private let addW: CGFloat = 96
     private let folderW: CGFloat = 26
     private let gap: CGFloat = 6
 
@@ -5287,10 +5577,8 @@ final class StorageTabView: NSView {
             NSWorkspace.shared.open(URL(fileURLWithPath: d))
         }
         addButton.title = "Add Images"
-        addButton.fontSize = 12
         addButton.onClick = { [weak self] in self?.addFiles() }
         chooseButton.title = "Set Folder"
-        chooseButton.fontSize = 12
         chooseButton.toolTip = "Change the Wallpaper Folder"
         chooseButton.onClick = { [weak self] in self?.chooseDirectory() }
         addSubview(browseButton)
@@ -5665,7 +5953,7 @@ final class UpdateTabView: NSView {
     }
 
     private func blockHeight() -> CGFloat {
-        CGFloat(stackLines().count) * lineH + (installButton.isHidden ? 0 : 34 + 14)
+        CGFloat(stackLines().count) * lineH + (installButton.isHidden ? 0 : 24 + 14)
     }
 
     override func layout() {
@@ -5673,14 +5961,14 @@ final class UpdateTabView: NSView {
         var top = (bounds.height - blockHeight()) / 2
         if !installButton.isHidden {
             installButton.frame = NSRect(x: (bounds.width - 160) / 2,
-                                         y: bounds.height - top - 34, width: 160, height: 34)
-            top += 34 + 14
+                                         y: bounds.height - top - 24, width: 96, height: 24)
+            top += 24 + 14
         }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         var top = (bounds.height - blockHeight()) / 2
-        if !installButton.isHidden { top += 34 + 14 }
+        if !installButton.isHidden { top += 24 + 14 }
         for (text, font, color) in stackLines() {
             drawMidCenter(text, font, color, centerX: bounds.midX,
                           midTop: top + lineH / 2, height: bounds.height)

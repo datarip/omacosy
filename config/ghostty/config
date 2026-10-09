@@ -5,10 +5,11 @@
 
 # No titlebar, no traffic lights — the Hyprland look. Close is Super+W,
 # moving is Super+Shift+arrows, so nothing the bar provided is lost.
-# Colours of the custom theme on screen, written by omacosy-auto-theme while it
-# is on (`omacosy-auto-theme on`). The leading ? makes the include OPTIONAL, so a
-# machine that never turns it on, or has just installed, reads no such file and
-# keeps whatever colours you set. Your own config is read after this one, so a
+# Colours of the custom theme on screen, written by omacosy-term-auto-theme
+# while the terminal follows the theme (`omacosy-term-auto-theme on`). The
+# leading ? makes the include OPTIONAL, so a machine that never turns it on,
+# or has just installed, reads no such file and keeps whatever colours you
+# set. Your own config is read after this one, so a
 # colour you set by hand still wins.
 config-file = ?~/.config/omacosy/ghostty-theme.conf
 

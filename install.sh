@@ -137,7 +137,7 @@ if [ "$WITH_YAZI" = 1 ]; then
   [ "$YAZI_FULL" = 1 ] && { brew list --cask font-symbols-only-nerd-font >/dev/null 2>&1 \
     || brew install --cask font-symbols-only-nerd-font || log "WARNING: could not install font-symbols-only-nerd-font"; }
 fi
-# The terminal tools omacosy-auto-theme colours beyond the Brewfile's own
+# The terminal tools omacosy-term-auto-theme colours beyond the Brewfile's own
 # (bat, fzf, lazygit and btop are there already). Opt-in, and installed between
 # the two package snapshots like yazi, so uninstall.sh takes away exactly these.
 if [ "$WITH_TUI" = 1 ]; then
@@ -569,8 +569,9 @@ if [ ! -x "$HOME/.local/bin/omacosy-themecore" ] || [ "$REPO_DIR/helper/themecor
   swiftc -O -o "$HOME/.local/bin/omacosy-themecore" "$REPO_DIR/helper/themecore.swift"
 fi
 
-# terminal palette for the theme on screen. Used only while
-# `omacosy-auto-theme on`; building it costs nothing otherwise.
+# terminal palette for the theme on screen. Used only while the terminal
+# follows the theme (`omacosy-term-auto-theme on`); building it costs nothing
+# otherwise.
 if [ ! -x "$HOME/.local/bin/omacosy-term-palette" ] || [ "$REPO_DIR/helper/term-palette.swift" -nt "$HOME/.local/bin/omacosy-term-palette" ]; then
   log "Building omacosy-term-palette"
   swiftc -O -o "$HOME/.local/bin/omacosy-term-palette" "$REPO_DIR/helper/term-palette.swift"
@@ -879,11 +880,13 @@ link "$REPO_DIR/bin/theme-next" "$HOME/.local/bin/theme-next"
 link "$REPO_DIR/bin/theme-bg-next" "$HOME/.local/bin/theme-bg-next"
 link "$REPO_DIR/bin/omacosy-theme-switch" "$HOME/.local/bin/omacosy-theme-switch"
 link "$REPO_DIR/bin/omacosy-custom-theme" "$HOME/.local/bin/omacosy-custom-theme"
-link "$REPO_DIR/bin/omacosy-auto-theme" "$HOME/.local/bin/omacosy-auto-theme"
-# the old name of omacosy-auto-theme; its link would point at nothing
-case "$(readlink "$HOME/.local/bin/omacosy-term-sync" 2>/dev/null || true)" in
-  *omacosy*) rm -f "$HOME/.local/bin/omacosy-term-sync" ;;
-esac
+link "$REPO_DIR/bin/omacosy-term-auto-theme" "$HOME/.local/bin/omacosy-term-auto-theme"
+# the old names of omacosy-term-auto-theme; their links would point at nothing
+for old in omacosy-auto-theme omacosy-term-sync; do
+  case "$(readlink "$HOME/.local/bin/$old" 2>/dev/null || true)" in
+    *omacosy*) rm -f "$HOME/.local/bin/$old" ;;
+  esac
+done
 link "$REPO_DIR/bin/omacosy-appearance" "$HOME/.local/bin/omacosy-appearance"
 link "$REPO_DIR/bin/omacosy-toggle" "$HOME/.local/bin/omacosy-toggle"
 link "$REPO_DIR/bin/omacosy-ws" "$HOME/.local/bin/omacosy-ws"

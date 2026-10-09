@@ -1,32 +1,26 @@
 #!/usr/bin/env bash
-# omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]|
-#                     apply-theme <dir> [<label>]|enabled]
-# — whether the desktop and its apps take their colours from your own
-# wallpapers. No args = status.
+# omacosy-term-auto-theme [on|off|status|apply [<label>]|
+#                          apply-theme <dir> [<label>]]
+# — whether the terminal and its apps take their colours from the wallpaper
+# theme. No args = status.
 #
-# OFF BY DEFAULT. On a new install there is no custom theme and nothing is
-# recoloured: the four stock themes are all there is. `on` does two things:
+# The desktop always follows: every wallpaper in ~/Pictures/wallpapers is a
+# theme of its own in the cycle, and the bar, the ring and the cheat sheet
+# take its colours (omacosy-custom-theme). This command only decides whether
+# that theme extends to the terminal:
 #
-#   - the custom theme appears in the theme cycle: every wallpaper in
-#     ~/Pictures/wallpapers is a theme of its own, and the bar, the ring and
-#     the cheat sheet take its colours (omacosy-custom-theme)
-#   - while a custom theme is on screen, unless `on desktop-only` was asked,
-#     the terminal and its apps take the same colours: Ghostty, the Starship
-#     prompt, ls and eza, bat, delta
-#     and its line strips, fzf, lazygit, fastfetch, yazi, btop, Neovim (a
-#     plugin that `on` links into ~/.config/nvim/lua/plugins/), and the band
-#     behind tmux's bar
+#   on   Ghostty, the Starship prompt, ls and eza, bat, delta and its line
+#        strips, fzf, lazygit, fastfetch, yazi, btop and Neovim (a plugin
+#        this command links into ~/.config/nvim/lua/plugins/) follow the
+#        theme
+#   off  they keep their own colours (off by default)
 #
 # A STOCK THEME IS NEVER CHANGED. When one is on screen, every file this
 # script generated is removed and each app shows its own colours again.
 #
-# ~/.config/omacosy/auto-theme.conf:
+# ~/.config/omacosy/term-auto-theme.conf:
 #
-#   auto-theme = on | off         off by default
-#   apps = on | off               on by default; off (`on desktop-only`) keeps
-#                                 the custom themes for the bar, the ring and the
-#                                 cheat sheet, and leaves the terminal and its
-#                                 apps in their own colours
+#   terminal = on | off           off by default; the desktop always follows
 #   applier = <command>           empty = omacosy renders the files itself
 #
 # WHAT IT DOES. Every switch to a custom theme writes its palette to
@@ -46,9 +40,11 @@
 set -euo pipefail
 
 DIR="$HOME/.config/omacosy"
-CONF="$DIR/auto-theme.conf"
-# the config of omacosy-term-sync, this command's old name; read once and moved
-OLD_CONF="$DIR/term.conf"
+CONF="$DIR/term-auto-theme.conf"
+# the two earlier names, read once and moved: auto-theme.conf carried the
+# auto-theme/apps keys, term.conf before it carried theming
+OLD_CONF="$DIR/auto-theme.conf"
+OLDER_CONF="$DIR/term.conf"
 PALETTE="$DIR/term-palette.env"
 GHOSTTY_OUT="$DIR/ghostty-theme.conf"
 STARSHIP_OUT="$DIR/starship.toml"
@@ -70,22 +66,43 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 STARSHIP_TEMPLATE="$REPO_DIR/config/starship-omacosy.template.toml"
 NVIM_PLUGIN="$REPO_DIR/config/nvim/omacosy-theme.lua"
 CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
-THEME_SET="$REPO_DIR/bin/theme-set"
-THEMES_DIR="$REPO_DIR/themes"
-LAST_STOCK="$HOME/.local/state/omacosy/last-stock-theme"
 
-# The old name's settings carry over: `theming` becomes `auto-theme`, the
-# applier stays. Done once, then term.conf is gone, so two files never disagree.
+# Where the new file is missing, an earlier name's settings carry over. The
+# terminal setting is the only one that survives: the desktop side no longer
+# has a switch of its own, so it has nothing to migrate. Done once, then the
+# old file is gone, so two files never disagree.
+read_key() {
+  grep -E "^$2 *=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^ *//;s/ *$//'
+}
+
 migrate() {
-  [ -f "$CONF" ] || [ ! -f "$OLD_CONF" ] || {
-    mkdir -p "$DIR"
-    {
-      printf '# omacosy — do the desktop and its apps follow your own wallpapers?\n'
-      printf '# auto-theme = on | off     (off by default)\n'
-      printf '# applier = <command>       (empty: omacosy writes the config itself)\n'
-      sed -n 's/^theming *=/auto-theme =/p; /^applier *=/p' "$OLD_CONF"
-    } > "$CONF.tmp" && mv "$CONF.tmp" "$CONF" && rm -f "$OLD_CONF"
-  }
+  [ -f "$CONF" ] && return 0
+  local old="" terminal="" applier=""
+  if [ -f "$OLD_CONF" ]; then
+    old="$OLD_CONF"
+    applier="$(read_key "$old" applier)"
+    # apps was the effective setting; auto-theme was the master switch, so
+    # it only answers when apps was never written
+    case "$(read_key "$old" apps)" in
+      on)  terminal=on ;;
+      off) terminal=off ;;
+      *)   [ "$(read_key "$old" auto-theme)" = on ] && terminal=on || terminal=off ;;
+    esac
+  elif [ -f "$OLDER_CONF" ]; then
+    old="$OLDER_CONF"
+    applier="$(read_key "$old" applier)"
+    [ "$(read_key "$old" theming)" = on ] && terminal=on || terminal=off
+  else
+    return 0
+  fi
+  mkdir -p "$DIR"
+  {
+    printf '# omacosy — does the terminal follow the wallpaper theme?\n'
+    printf '# terminal = on | off    (off by default; the desktop always follows)\n'
+    printf '# applier = <command>    (empty: omacosy writes the config itself)\n'
+    [ -n "$applier" ] && printf 'applier = %s\n' "$applier"
+    printf 'terminal = %s\n' "${terminal:-off}"
+  } > "$CONF.tmp" && mv "$CONF.tmp" "$CONF" && rm -f "$old"
 }
 
 conf_get() {
@@ -97,7 +114,7 @@ conf_get() {
 conf_set() {
   migrate
   mkdir -p "$DIR"
-  [ -f "$CONF" ] || printf '# omacosy — do the desktop and its apps follow your own wallpapers?\n# auto-theme = on | off     (off by default)\n# applier = <command>       (empty: omacosy writes the config itself)\n# apps = on | off           (off: only the desktop follows custom themes)\n' > "$CONF"
+  [ -f "$CONF" ] || printf '# omacosy — does the terminal follow the wallpaper theme?\n# terminal = on | off    (off by default; the desktop always follows)\n# applier = <command>    (empty: omacosy writes the config itself)\n' > "$CONF"
   if grep -qE "^$1 *=" "$CONF"; then
     awk -v k="$1" -v v="$2" '$0 ~ "^"k" *=" { print k" = "v; next } { print }' "$CONF" > "$CONF.tmp"
     mv "$CONF.tmp" "$CONF"
@@ -106,9 +123,8 @@ conf_set() {
   fi
 }
 
-setting() { case "$(conf_get auto-theme)" in on) echo on ;; *) echo off ;; esac; }
-# the terminal and its apps follow custom themes unless apps = off
-apps_setting() { case "$(conf_get apps)" in off) echo off ;; *) echo on ;; esac; }
+# the terminal and its apps follow only when terminal = on
+setting() { case "$(conf_get terminal)" in on) echo on ;; *) echo off ;; esac; }
 
 # An applier is a command, so it is looked up the way a command is — but
 # Karabiner runs a keybinding with PATH=/usr/bin:/bin only, where nothing a
@@ -137,8 +153,8 @@ val() { eval "printf '%s' \"\${$1:-}\"" | tr -d "'"; }
 write_ghostty() {
   local i
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
-    printf '# Edit nothing here; run `omacosy-auto-theme off` to stop it.\n'
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
+    printf '# Edit nothing here; run `omacosy-term-auto-theme off` to stop it.\n'
     printf 'background = %s\n' "$(val OMACOSY_BG)"
     printf 'foreground = %s\n' "$(val OMACOSY_FG)"
     printf 'cursor-color = %s\n' "$(val OMACOSY_CURSOR)"
@@ -158,7 +174,7 @@ write_starship() {
   local n u
   {
     cat "$STARSHIP_TEMPLATE"
-    printf '\n# ---- palette generated by omacosy-auto-theme ----\n\n[palettes.omacosy]\n'
+    printf '\n# ---- palette generated by omacosy-term-auto-theme ----\n\n[palettes.omacosy]\n'
     printf 'bg = "%s"\n'      "$(val OMACOSY_BG)"
     printf 'fg = "%s"\n'      "$(val OMACOSY_FG)"
     printf 'accent = "%s"\n'  "$(val OMACOSY_ACCENT)"
@@ -190,7 +206,7 @@ write_shell_env() {
   a="$(val OMACOSY_ACCENT)"; a="${a#\#}"
   r=$((16#${a:0:2})); g=$((16#${a:2:2})); b=$((16#${a:4:2}))
   {
-    printf '# generated by omacosy-auto-theme. Sourced by omacosy zsh/zshrc.\n'
+    printf '# generated by omacosy-term-auto-theme. Sourced by omacosy zsh/zshrc.\n'
     printf 'if [ -z "${OMACOSY_THEMED_ENV:-}" ]; then\n'
     printf '  export OMACOSY_THEMED_ENV=1\n'
     for v in $SHELL_VARS; do printf '  export OMACOSY_OLD_%s="${%s:-}"\n' "$v" "$v"; done
@@ -243,7 +259,7 @@ write_shell_env() {
 write_yazi() {
   local dirp; dirp="$(dirname "$YAZI_OUT")"
   [ -d "$dirp" ] || mkdir -p "$dirp"
-  if [ -f "$YAZI_OUT" ] && ! head -1 "$YAZI_OUT" | grep -q 'generated by omacosy-\(term-sync\|auto-theme\)'; then
+  if [ -f "$YAZI_OUT" ] && ! head -1 "$YAZI_OUT" | grep -q 'generated by omacosy-\(term-sync\|auto-theme\|term-auto-theme\)'; then
     return 0
   fi
   # THE ACCENT ITSELF, in hex, not the nearest palette slot.
@@ -257,7 +273,7 @@ write_yazi() {
   # the accent. Exact colours cost a reopen and are always on theme.
   local acc; acc="$(val OMACOSY_ACCENT)"
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
     printf '# yazi reads this when it starts, so a window already open keeps its\n'
     printf '# colours until you reopen it. A file of your own here is never\n'
     printf '# overwritten: delete the first line to keep it.\n\n'
@@ -355,13 +371,13 @@ write_yazi() {
   } > "$YAZI_OUT.tmp" && mv "$YAZI_OUT.tmp" "$YAZI_OUT"
 }
 
-# A stock theme is on screen, or auto-theme was turned off: put back what the
+# A stock theme is on screen, or the terminal keeps its own colours: put back
 # shell had before. Written, not deleted, because a shell that is already open
 # re-reads this file on SIGWINCH, and a missing file would leave it themed.
 write_shell_clear() {
   local v
   {
-    printf '# generated by omacosy-auto-theme. Sourced by omacosy zsh/zshrc.\n'
+    printf '# generated by omacosy-term-auto-theme. Sourced by omacosy zsh/zshrc.\n'
     printf '# No custom theme on screen: a shell that was themed gets its own values back.\n'
     printf 'if [ -n "${OMACOSY_THEMED_ENV:-}" ]; then\n'
     for v in $SHELL_VARS; do
@@ -376,7 +392,7 @@ write_shell_clear() {
 
 # only ours: a theme.toml you wrote yourself has no such first line
 remove_yazi() {
-  if [ -f "$YAZI_OUT" ] && head -1 "$YAZI_OUT" | grep -q 'generated by omacosy-\(term-sync\|auto-theme\)'; then
+  if [ -f "$YAZI_OUT" ] && head -1 "$YAZI_OUT" | grep -q 'generated by omacosy-\(term-sync\|auto-theme\|term-auto-theme\)'; then
     rm -f "$YAZI_OUT"
   fi
 }
@@ -436,8 +452,8 @@ have() { bin_path "$1" >/dev/null; }
 write_tmux() {
   have tmux || { rm -f "$TMUX_OUT"; return 0; }
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
-    printf "run-shell \"'%s' tmux-bar '%s'\"\n" "$REPO_DIR/bin/omacosy-auto-theme" "$(val OMACOSY_BG)"
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
+    printf "run-shell \"'%s' tmux-bar '%s'\"\n" "$REPO_DIR/bin/omacosy-term-auto-theme" "$(val OMACOSY_BG)"
   } > "$TMUX_OUT.tmp" && mv "$TMUX_OUT.tmp" "$TMUX_OUT"
   tmux_reload
 }
@@ -538,7 +554,7 @@ write_delta() {
   local bg ok err
   bg="$(val OMACOSY_BG)"; ok="$(val OMACOSY_OK)"; err="$(val OMACOSY_ERR)"
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
     printf '[delta]\n'
     printf '\tplus-style = "syntax %s"\n' "$(strip_colour "$bg" "$ok" 0.07 0.075)"
     printf '\tminus-style = "normal %s"\n' "$(strip_colour "$bg" "$err" 0.07 0.075)"
@@ -551,7 +567,7 @@ write_delta() {
 write_lazygit() {
   have lazygit || { rm -f "$LAZYGIT_OUT"; return 0; }
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
     printf 'gui:\n  theme:\n'
     printf '    activeBorderColor: ["%s", "bold"]\n' "$(val OMACOSY_ACCENT)"
     printf '    inactiveBorderColor: ["%s"]\n' "$(val OMACOSY_MUTED)"
@@ -589,11 +605,11 @@ write_btop() {
   bg="$(val OMACOSY_BG)"; fg="$(val OMACOSY_FG)"; acc="$(val OMACOSY_ACCENT)"; muted="$(val OMACOSY_MUTED)"
   box="$(mix "$bg" "$acc" 55)"
   mkdir -p "$BTOP_DIR/themes"
-  if [ -f "$BTOP_OUT" ] && ! head -1 "$BTOP_OUT" | grep -q 'generated by omacosy-auto-theme'; then
+  if [ -f "$BTOP_OUT" ] && ! head -1 "$BTOP_OUT" | grep -q 'generated by omacosy-\(auto-theme\|term-auto-theme\)'; then
     return 0
   fi
   {
-    printf '# generated by omacosy-auto-theme from the theme on screen.\n'
+    printf '# generated by omacosy-term-auto-theme from the theme on screen.\n'
     printf '# A file of your own here is never overwritten: delete this line to keep it.\n'
     # empty: btop draws on the terminal's own background, so Ghostty's
     # transparency shows through it as it does in the shell
@@ -662,7 +678,7 @@ clear_btop() {
     pkill -USR2 -x -u "${USER:-$(id -un)}" btop 2>/dev/null || true
   fi
   rm -f "$BTOP_SAVED"
-  if [ -f "$BTOP_OUT" ] && head -1 "$BTOP_OUT" | grep -q 'generated by omacosy-auto-theme'; then
+  if [ -f "$BTOP_OUT" ] && head -1 "$BTOP_OUT" | grep -q 'generated by omacosy-\(auto-theme\|term-auto-theme\)'; then
     rm -f "$BTOP_OUT"
   fi
 }
@@ -677,7 +693,7 @@ write_nvim() {
   bg="$(val OMACOSY_BG)"; fg="$(val OMACOSY_FG)"; muted="$(val OMACOSY_MUTED)"
   mkdir -p "$(dirname "$NVIM_OUT")"
   {
-    printf -- '-- generated by omacosy-auto-theme from the theme on screen.\n'
+    printf -- '-- generated by omacosy-term-auto-theme from the theme on screen.\n'
     printf 'return {\n'
     printf '  name = "%s",\n' "$(val OMACOSY_THEME)"
     printf '  dark = %s,\n' "$([ "$(val OMACOSY_IS_DARK)" = 0 ] && echo false || echo true)"
@@ -792,7 +808,7 @@ theme_apps() {
   repaint
 }
 
-# A stock theme is on screen, or auto-theme is off: every app shows its own
+# A stock theme is on screen, or terminal = off: every app shows its own
 # colours again. Ghostty's include is optional, so removing the file is the
 # whole undo for the next window; windows already open are reset below.
 clear_apps() {
@@ -820,13 +836,12 @@ clear_apps() {
 }
 
 # Called by theme-set and theme-bg-next after every switch. Silent and always
-# exit 0: a theme switch must never fail because of this.
+# exit 0: a theme switch must never fail because of this. With terminal = off
+# a custom theme is treated like a stock one for the apps: every generated
+# file goes and each app shows its own colours.
 cmd_apply() {
-  [ "$(setting)" = on ] || exit 0
   local label="${1:-omacosy}"
-  # with apps = off a custom theme is treated like a stock one for the apps:
-  # every generated file goes and each app shows its own colours
-  if on_custom && [ "$(apps_setting)" = on ]; then theme_apps "$label"; else clear_apps "$label"; fi
+  if on_custom && [ "$(setting)" = on ]; then theme_apps "$label"; else clear_apps "$label"; fi
   exit 0
 }
 
@@ -834,98 +849,53 @@ cmd_apply() {
 # directory is explicit, so this does not depend on the live symlink having
 # been swapped already; the palette comes from the directory's colors.toml
 # (omacosy-term-palette's stock branch), not from a wallpaper. `applier`
-# and `apps = off` behave exactly as they do on any custom theme.
+# and terminal = off behave exactly as they do on any custom theme.
 cmd_apply_theme() {
-  [ "$(setting)" = on ] || exit 0
   local dir="${1:-}" label="${2:-theme}"
-  [ -n "$dir" ] && [ -d "$dir" ] || { echo "omacosy-auto-theme: apply-theme needs a theme directory" >&2; exit 1; }
-  if [ "$(apps_setting)" = on ]; then theme_apps "$label" "$dir"; else clear_apps "$label"; fi
+  [ -n "$dir" ] && [ -d "$dir" ] || { echo "omacosy-term-auto-theme: apply-theme needs a theme directory" >&2; exit 1; }
+  if [ "$(setting)" = on ]; then theme_apps "$label" "$dir"; else clear_apps "$label"; fi
   exit 0
 }
 
-stock_count() { local n=0 t; for t in "$THEMES_DIR"/*/; do n=$((n+1)); done; echo "$n"; }
-
 cmd_on() {
-  case "${1:-}" in
-    "") conf_set apps on ;;
-    desktop-only) conf_set apps off ;;
-    *) echo "usage: omacosy-auto-theme on [desktop-only]" >&2; exit 2 ;;
-  esac
-  conf_set auto-theme on
-  if [ "$(apps_setting)" = on ]; then
-    echo "auto-theme: on (the desktop, the terminal and its apps)"
-    link_nvim
-  else
-    echo "auto-theme: on, desktop only (bar, ring, cheat sheet); the terminal and its apps keep their own colours"
-    unlink_nvim
-  fi
-  local d n
-  if d="$("$CUSTOM" dir 2>/dev/null)"; then
-    n="$("$CUSTOM" list 2>/dev/null | wc -l | tr -d ' ')"
-    echo "  the custom theme is in the Super+Shift+T cycle: $n wallpapers in $d"
-  else
-    echo "  add pictures to ~/Pictures/wallpapers to get a custom theme"
-  fi
-  # a day= or night= value that names a wallpaper of your own could not be
-  # shown while this was off, so the appearance is applied again now
-  if [ -x "$REPO_DIR/bin/omacosy-appearance" ]; then
-    "$REPO_DIR/bin/omacosy-appearance" --force >/dev/null 2>&1 || true
-  fi
+  [ $# -eq 0 ] || { echo "omacosy-term-auto-theme: on takes no argument" >&2; exit 2; }
+  conf_set terminal on
+  link_nvim
+  echo "terminal auto-theme: on — the terminal and its apps follow the wallpaper theme"
   cmd_apply "$("$CUSTOM" current 2>/dev/null || echo omacosy)"
 }
 
 cmd_off() {
-  local was_custom="" back
-  on_custom && was_custom=1
-  conf_set auto-theme off
-  # The custom theme no longer exists, so it cannot stay on screen: back to
-  # the stock theme used last, or the first one.
-  if [ -n "$was_custom" ]; then
-    back="$(cat "$LAST_STOCK" 2>/dev/null || true)"
-    [ -n "$back" ] && [ -d "$THEMES_DIR/$back" ] || back="$(basename "$(ls -d "$THEMES_DIR"/*/ | head -1)")"
-    "$THEME_SET" "$back" >/dev/null 2>&1 || true
-  fi
-  clear_apps "$("$CUSTOM" current 2>/dev/null || echo omacosy)"
+  conf_set terminal off
   unlink_nvim
-  echo "auto-theme: off"
-  echo "  $(stock_count) stock themes only; every app shows its own colours"
+  clear_apps "$("$CUSTOM" current 2>/dev/null || echo omacosy)"
+  echo "terminal auto-theme: off — the terminal and its apps keep their own colours"
+  echo "  the desktop, the bar, the ring and the cheat sheet still follow the wallpaper theme"
 }
 
 cmd_status() {
   local cmd d n now
   cmd="$(applier_cmd || true)"
   now="$("$CUSTOM" current 2>/dev/null || echo none)"
-  echo "auto-theme   : $(setting)"
-  if [ "$(apps_setting)" = on ]; then
-    echo "apps         : on — the terminal and its apps follow custom themes"
-  else
-    echo "apps         : off — desktop only; the terminal and its apps keep their own colours"
-  fi
   if [ "$(setting)" = on ]; then
-    if d="$("$CUSTOM" dir 2>/dev/null)"; then
-      n="$("$CUSTOM" list 2>/dev/null | wc -l | tr -d ' ')"
-      echo "custom theme : $n wallpapers in $d"
-    else
-      echo "custom theme : none, no pictures in the wallpaper folder"
-    fi
+    echo "terminal auto-theme : on — the terminal and its apps follow the wallpaper theme"
   else
-    echo "custom theme : hidden while auto-theme is off"
+    echo "terminal auto-theme : off — the terminal and its apps keep their own colours"
+  fi
+  if d="$("$CUSTOM" dir 2>/dev/null)"; then
+    n="$("$CUSTOM" list 2>/dev/null | wc -l | tr -d ' ')"
+    echo "custom theme : $n wallpapers in $d"
+  else
+    echo "custom theme : none, no pictures in the wallpaper folder"
   fi
   case "$now" in
-    custom)
-      if [ "$(apps_setting)" = on ]; then
-        echo "on screen    : custom — the apps follow the wallpaper"
+    custom|theme:*)
+      if [ "$(setting)" = on ]; then
+        echo "on screen    : $now — the apps follow it"
       else
-        echo "on screen    : custom — the desktop follows the wallpaper, the apps do not"
+        echo "on screen    : $now — the desktop follows it, the apps do not"
       fi ;;
-    theme:*)
-      if [ "$(apps_setting)" = on ]; then
-        echo "on screen    : $now — an edition of a custom theme, the apps follow it"
-      else
-        echo "on screen    : $now — an edition of a custom theme, the apps do not follow it"
-      fi ;;
-    *)
-      echo "on screen    : $now — a stock theme, the apps show their own colours" ;;
+    *) echo "on screen    : $now — a stock theme, the apps show their own colours" ;;
   esac
   echo "applier      : ${cmd:-omacosy (writes the config itself)}"
   echo "palette      : $([ -f "$PALETTE" ] && echo "$PALETTE" || echo none)"
@@ -939,14 +909,12 @@ cmd_status() {
 }
 
 case "${1:-status}" in
-  on)      shift; cmd_on "${1:-}" ;;
+  on)      shift; cmd_on "$@" ;;
   off)     cmd_off ;;
   status)  cmd_status ;;
   apply)   shift; cmd_apply "${1:-omacosy}" ;;
   apply-theme) shift; cmd_apply_theme "${1:-}" "${2:-theme}" ;;
-  # quiet, for omacosy-custom-theme: exit 0 when the custom theme may exist
-  enabled) [ "$(setting)" = on ] ;;
   # run by tmux from tmux-theme.conf: the bar's band takes the terminal's background
   tmux-bar) shift; cmd_tmux_bar "${1:-}" ;;
-  *) echo "usage: omacosy-auto-theme [on [desktop-only]|off|status|apply [<label>]|apply-theme <dir> [<label>]]" >&2; exit 2 ;;
+  *) echo "usage: omacosy-term-auto-theme [on|off|status|apply [<label>]|apply-theme <dir> [<label>]]" >&2; exit 2 ;;
 esac

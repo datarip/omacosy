@@ -42,7 +42,7 @@ recolour_for() {
   printf '%s\n' "$1" > "$CUSTOM_INDEX"
   ln -sfn "$dir" "$CURRENT_THEME"
   # a new wallpaper is a new palette, so the apps follow it here too
-  "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/omacosy-auto-theme" apply custom || true
+  "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/omacosy-term-auto-theme" apply custom || true
 }
 
 set_bg() {

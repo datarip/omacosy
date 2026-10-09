@@ -1,30 +1,71 @@
-# Auto-theme: the terminal and its apps follow your wallpaper
+# Terminal auto-theme: the terminal and its apps follow your wallpaper
 
-Off by default. `omacosy-auto-theme on` turns on the custom theme, where every
-wallpaper in `~/Pictures/wallpapers` is a theme of its own
-([derived-themes.md](derived-themes.md)). While a custom theme is on screen,
-the terminal and its apps take the colours of the same wallpaper: Ghostty, the
-Starship prompt, the directory colour in `ls` and `eza`, yazi, btop, Neovim,
-bat, delta and its line strips, fzf, lazygit, fastfetch, and the band behind
-tmux's bar.
+The desktop side is always on: every wallpaper in `~/Pictures/wallpapers` is a
+theme of its own ([derived-themes.md](derived-themes.md)), and the bar, the
+focus ring and the cheat sheet take its colours. This command decides one
+thing — whether that theme also extends to the terminal and its apps: Ghostty,
+the Starship prompt, the directory colour in `ls` and `eza`, yazi, btop,
+Neovim, bat, delta and its line strips, fzf, lazygit, fastfetch, and the band
+behind tmux's bar.
+
+Off by default, because a terminal's colours are a personal choice.
 
 ```sh
-omacosy-auto-theme            # status: switch, custom theme, applier, palette file, btop, Neovim
-omacosy-auto-theme on
-omacosy-auto-theme on desktop-only
-omacosy-auto-theme off
+omacosy-term-auto-theme            # status
+omacosy-term-auto-theme on         # the terminal and its apps follow the wallpaper theme
+omacosy-term-auto-theme off        # they keep their own colours
 ```
 
-**Desktop only.** `on desktop-only` sets `apps = off`: the custom themes stay,
-and the bar, the focus ring and the cheat sheet follow the wallpaper, but on a
-custom theme `apply` does what it does on a stock theme for the apps. Every
-generated file is removed and each app shows its own colours. `on` alone sets
-`apps = on` again and links the Neovim plugin back.
+**`on`** writes the generated files again and links the Neovim plugin back.
+**`off`** removes every generated file, puts back the settings it replaced
+(btop's `color_theme`, the shell variables) and resets the colours of open
+terminals (OSC 104, 110, 111, 112) or runs `<applier> --clear <label>`. The
+desktop, the bar, the ring and the cheat sheet follow the wallpaper in both
+states. Stored as `terminal = on | off` in
+`~/.config/omacosy/term-auto-theme.conf`.
+
+## What changed on 2026-10-09
+
+The switch used to be a master. `omacosy-auto-theme off` hid the custom theme
+from the cycle, refused the wallpaper list, day/night and the editor, and left
+the desktop frozen on a stock theme; `on desktop-only` existed to tease the
+desktop and the terminal apart. Now the desktop always follows and only the
+terminal is optional — one choice instead of a mode matrix:
+
+| | before (`omacosy-auto-theme off`) | after (`omacosy-term-auto-theme off`) |
+| --- | --- | --- |
+| custom theme in the cycle | hidden | always, when pictures exist |
+| wallpaper list, day/night, editor | refused | always work |
+| bar, ring, cheat sheet | frozen on the stock theme | follow the wallpaper |
+| terminal tools | own colours | own colours |
+| `on` | desktop + terminal | the terminal follows too |
+
+The problems this fixes, all found while building the Theme Studio:
+
+- the wallpaper list was always visible while the cycle silently dropped
+  `custom` — two different answers to the same question;
+- after applying a wallpaper from the Studio with the old switch off,
+  `Super+Shift+B` errored with "theme has no backgrounds": an explicit
+  action had created a state the keyboard paths could not handle;
+- a `day=`/`night=` value naming one of your wallpapers was refused;
+- `off` and `on desktop-only` both meant "the terminal keeps its own
+  colours", but only one kept the desktop — a distinction with no value to
+  the user;
+- a developer could not keep a hand-built terminal theme (starship, tmux,
+  btop, Neovim) without giving up the wallpaper-driven desktop.
+
+The rename and the semantics follow the Theme Studio, whose premise is that
+every wallpaper is an auto-theme, always visible and editable, and whose rule
+is that a hand-built terminal theme must be safe: choosing `off` keeps it,
+and the desktop still follows. Earlier files are migrated on first use —
+`auto-theme.conf` (or `term.conf` before it) is read once and replaced by
+`term-auto-theme.conf` with a `terminal` key. Nothing else carries over,
+because the desktop no longer has a switch.
 
 `theme-set`, `theme-bg-next` and `omacosy-theme-switch` call
-`omacosy-auto-theme apply <label>` after they repoint
+`omacosy-term-auto-theme apply <label>` after they repoint
 `~/.config/omarchy/current/theme`. Nothing else calls it, except tmux, which
-runs `omacosy-auto-theme tmux-bar` from its own config.
+runs `omacosy-term-auto-theme tmux-bar` from its own config.
 
 The two theme keys run `omacosy-theme-switch` (README, Themes), which applies
 this in step with the instant wallpaper switch: the terminal and its tools are
@@ -66,7 +107,7 @@ auto-theme: it stays the same on every theme.
 on screen and writes one palette file.
 
 **A shipped theme** (`themes/<name>/`) carries `colors.toml`, a designer's own
-16 colors, and they are used as they are. `omacosy-auto-theme` never asks for
+16 colors, and they are used as they are. `omacosy-term-auto-theme` never asks for
 this: a stock theme leaves the terminal alone.
 
 **A computed theme** (a wallpaper of your own) has no `colors.toml`, so the 16
@@ -109,17 +150,16 @@ background, the foreground and `OMACOSY_MUTED`.
 
 ## 3. Who applies it
 
-`~/.config/omacosy/auto-theme.conf` (`term.conf`, the file of the old name
-`omacosy-term-sync`, is read once and moved into it):
+`~/.config/omacosy/term-auto-theme.conf` (`auto-theme.conf`, and `term.conf`
+before it, are read once and moved into it):
 
 ```
-auto-theme = on | off         off by default
-apps = on | off               on by default; off = `on desktop-only`
+terminal = on | off           off by default; on: the terminal and its apps follow
 applier = <command>           empty: omacosy writes the config itself
 ```
 
 **omacosy as the applier** writes these files, under `~/.config/omacosy/`
-unless the path says otherwise. The ones marked *both modes* are also written
+unless the path says otherwise. The ones marked *both* are also written
 when another tool is the applier, because no terminal palette reaches them:
 
 | File | Read by |
@@ -127,12 +167,12 @@ when another tool is the applier, because no terminal palette reaches them:
 | `ghostty-theme.conf` | Ghostty, through `config-file = ?~/.config/omacosy/ghostty-theme.conf` in the shipped config |
 | `starship.toml` | Starship, generated from `config/starship-omacosy.template.toml` plus the palette |
 | `term-env.sh` | `zsh/zshrc`: `EZA_COLORS`, `LS_COLORS`, `BAT_THEME=ansi` (bat and delta then draw in the 16 colours), `STARSHIP_CONFIG`, fzf's `--color` added to your own `FZF_DEFAULT_OPTS`, `LG_CONFIG_FILE` for lazygit, and a `fastfetch` function that adds the colours as options. Your own values are kept and put back on a stock theme, and a `fastfetch` function of your own is never replaced |
-| `lazygit-theme.yml` | lazygit, as the last file in `LG_CONFIG_FILE`: only the `gui.theme` keys, so your own `config.yml` keeps everything else. lazygit refuses to start when a named file is missing, so your `config.yml` is named only when it exists. *Both modes* |
-| `delta.gitconfig` | delta's line strips, through an include in `~/.gitconfig`. *Both modes* |
-| `tmux-theme.conf` | tmux, through `source-file -q` at the end of `tmux.conf`. *Both modes* |
-| `nvim/palette.lua` | Neovim, through `config/nvim/omacosy-theme.lua`. *Both modes* |
-| `~/.config/yazi/theme.toml` | yazi. *Both modes* |
-| `~/.config/btop/themes/omacosy.theme` | btop, through `color_theme = "omacosy"` in `btop.conf`. *Both modes* |
+| `lazygit-theme.yml` | lazygit, as the last file in `LG_CONFIG_FILE`: only the `gui.theme` keys, so your own `config.yml` keeps everything else. lazygit refuses to start when a named file is missing, so your `config.yml` is named only when it exists. *Both* |
+| `delta.gitconfig` | delta's line strips, through an include in `~/.gitconfig`. *Both* |
+| `tmux-theme.conf` | tmux, through `source-file -q` at the end of `tmux.conf`. *Both* |
+| `nvim/palette.lua` | Neovim, through `config/nvim/omacosy-theme.lua`. *Both* |
+| `~/.config/yazi/theme.toml` | yazi. *Both* |
+| `~/.config/btop/themes/omacosy.theme` | btop, through `color_theme = "omacosy"` in `btop.conf`. *Both* |
 
 The `?` makes Ghostty's include optional, so a machine that never turns this on
 reads no such file. Your own config is read after it, so a color you set by hand
@@ -166,7 +206,7 @@ from yazi's own error messages, kept so they are not learned twice:
   Colouring the rules alone leaves accent names next to blue icons.
 
 A `theme.toml` of your own is never touched: the file is only written when it
-is missing or when its first line says omacosy wrote it. `omacosy-auto-theme
+is missing or when its first line says omacosy wrote it. `omacosy-term-auto-theme
 off` deletes ours and leaves yours.
 
 yazi reads its theme when it starts, so a window that is already open keeps
@@ -231,17 +271,17 @@ reads at 7.4:1 or more.
 ## 4. Windows that are already open, and the next one
 
 Ghostty reads its config when it starts, not when it opens a window. So after
-every switch `omacosy-auto-theme` sends `SIGUSR2` to each Ghostty process,
+every switch `omacosy-term-auto-theme` sends `SIGUSR2` to each Ghostty process,
 which makes it read its config again; without that, a window opened after a
 switch took the colours Ghostty had at its start.
 
-A config file does not repaint a window that is open, so `omacosy-auto-theme`
+A config file does not repaint a window that is open, so `omacosy-term-auto-theme`
 also writes the colors to the tty of every shell as escape sequences (OSC 4,
 10, 11 and 12). The terminal consumes them, so a shell running Neovim or yazi
 is unharmed.
 
 The prompt needs one more step. Starship builds its prompt string when it draws
-a prompt, so the one on screen keeps the old colors. `omacosy-auto-theme` sends
+a prompt, so the one on screen keeps the old colors. `omacosy-term-auto-theme` sends
 SIGWINCH, and `zsh/zshrc` traps it, re-runs Starship's own precmd and redraws
 the line.
 
@@ -251,11 +291,11 @@ Two details that cost an afternoon, kept here so they are not learned twice:
   `/bin/zsh` finds nothing, and no window is repainted.
 - Karabiner runs a keybinding with `PATH=/usr/bin:/bin`. A command in
   `~/.local/bin` is not found there, so anything looked up by name alone
-  silently does nothing when the switch comes from the keyboard.
+  silently does nothing when the theme switch comes from the keyboard.
 
 ## 5. Neovim
 
-`omacosy-auto-theme on` links `config/nvim/omacosy-theme.lua` into
+`omacosy-term-auto-theme on` links `config/nvim/omacosy-theme.lua` into
 `~/.config/nvim/lua/plugins/`, the folder a lazy.nvim config (LazyVim,
 kickstart) loads plugins from. `off` removes the link. A file of your own with
 that name is never replaced or removed. Without that folder nothing is linked,
@@ -312,7 +352,7 @@ behind the bar changes: the colour it is painted on becomes the terminal's
 background.
 
 A theme plugin such as tmux-tokyo-night writes fixed colours into the text of
-the bar and takes no colours from outside. So `omacosy-auto-theme tmux-bar`,
+the bar and takes no colours from outside. So `omacosy-term-auto-theme tmux-bar`,
 run by tmux itself, reads the band colour from `status-style` after the bar is
 drawn. As a background it becomes `default`, the terminal's own, with its
 transparency. As a text colour it draws the arrows between a pill and the
@@ -332,9 +372,9 @@ source-file -q ~/.config/omacosy/tmux-theme.conf
 ```
 
 `-q` keeps tmux silent while the file does not exist: on a stock theme, and
-while auto-theme is off.
+while the terminal keeps its own colours.
 
 ## 7. What it does not touch
 
-Any other program with colours of its own. `omacosy-auto-theme off`
+Any other program with colours of its own. `omacosy-term-auto-theme off`
 deletes the generated files; the next window reads your own colours again.

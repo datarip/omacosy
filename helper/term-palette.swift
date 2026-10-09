@@ -15,9 +15,9 @@
 //            background.
 //
 // The output is one file of KEY='#rrggbb' lines, meant to be sourced by a
-// shell. WHO applies it is not this program's business: omacosy-auto-theme
+// shell. WHO applies it is not this program's business: omacosy-term-auto-theme
 // renders the terminal's own config files from it, or hands the file to a
-// command named in auto-theme.conf. The surface ramp is not written: a
+// command named in term-auto-theme.conf. The surface ramp is not written: a
 // consumer that wants one derives it from the background, the foreground and
 // MUTED.
 import AppKit

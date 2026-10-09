@@ -343,19 +343,22 @@ func logoImage() -> NSImage? {
 enum WindowManager: Int { case aerospace = 0, omniwm = 1 }
 enum CornerMode: Int { case rounded = 0, square = 1 }
 enum BarMode: Int { case visible = 0, hidden = 1, auto = 2 }
-enum AutoThemeMode: Int { case off = 0, desktopOnly = 1, on = 2 }
+enum TerminalThemeMode: Int { case own = 0, follow = 1 }
 
 struct DashboardState {
     var wm: WindowManager = .aerospace
     var corners: CornerMode = .rounded
     var bar: BarMode = .visible
     var fullscreen: Bool = false
-    var autoTheme: AutoThemeMode = .off
+    var termTheme: TerminalThemeMode = .own
 }
 
 let SETTINGS = HOME + "/.config/omacosy/settings.conf"
 let BARCONF = HOME + "/.config/omacosy/bar.conf"
-let AUTOCONF = HOME + "/.config/omacosy/auto-theme.conf"
+let TERMCONF = HOME + "/.config/omacosy/term-auto-theme.conf"
+// the setting's earlier home; read only until omacosy-term-auto-theme has
+// migrated it, so the row is truthful on the first open after an upgrade
+let OLD_AUTOCONF = HOME + "/.config/omacosy/auto-theme.conf"
 
 func readState() -> DashboardState {
     var s = DashboardState()
@@ -372,8 +375,16 @@ func readState() -> DashboardState {
 
     s.fullscreen = FileManager.default.fileExists(atPath: HOME + "/.config/omacosy/solo-fullscreen")
 
-    if (readConfKey(AUTOCONF, "auto-theme") ?? "off") == "on" {
-        s.autoTheme = (readConfKey(AUTOCONF, "apps") ?? "on") == "off" ? .desktopOnly : .on
+    // The terminal-following setting. Before the rename it lived in
+    // auto-theme.conf as `apps`, with the `auto-theme` master switch as the
+    // fallback when apps was never written; an unmigrated install reads
+    // exactly the same truth either way.
+    if let terminal = readConfKey(TERMCONF, "terminal") {
+        s.termTheme = terminal == "on" ? .follow : .own
+    } else if let apps = readConfKey(OLD_AUTOCONF, "apps") {
+        s.termTheme = apps == "off" ? .own : .follow
+    } else {
+        s.termTheme = (readConfKey(OLD_AUTOCONF, "auto-theme") ?? "off") == "on" ? .follow : .own
     }
     return s
 }
@@ -684,7 +695,7 @@ final class OptionsTabView: NSView, ScrollStepTab {
         let cornerSeg = makeSeg(["Rounded", "Square"], original.corners.rawValue)
         let barSeg = makeSeg(["Visible", "Hidden", "Auto"], original.bar.rawValue)
         let fsSeg = makeSeg(["Off", "On"], original.fullscreen ? 1 : 0)
-        let atSeg = makeSeg(["Off", "Desktop Only", "On"], original.autoTheme.rawValue)
+        let atSeg = makeSeg(["Own Colours", "Follow Theme"], original.termTheme.rawValue)
 
         rows = [
             OptionRow(category: "Window Manager", title: "Window Manager",
@@ -696,8 +707,8 @@ final class OptionsTabView: NSView, ScrollStepTab {
                       desc: "Keep the bar visible, let it hide at rest, or follow the display.", seg: barSeg),
             OptionRow(category: "Fullscreen", title: "Full Screen Mode",
                       desc: "A workspace holding one window fills the display.", seg: fsSeg),
-            OptionRow(category: "Themes", title: "Auto-Theme Mode",
-                      desc: "Derive colours from your own wallpapers, custom themes included.", seg: atSeg),
+            OptionRow(category: "Themes", title: "Terminal Auto-Theme",
+                      desc: "Let the terminal and its apps follow the wallpaper theme, or keep their own colours.", seg: atSeg),
         ]
         doc.rows = rows
         for r in rows { doc.addSubview(r.seg) }
@@ -740,7 +751,7 @@ final class OptionsTabView: NSView, ScrollStepTab {
         let corners = CornerMode(rawValue: rows[1].seg.index) ?? original.corners
         let bar = BarMode(rawValue: rows[2].seg.index) ?? original.bar
         let fullscreen = rows[3].seg.index == 1
-        let autoTheme = AutoThemeMode(rawValue: rows[4].seg.index) ?? original.autoTheme
+        let termTheme = TerminalThemeMode(rawValue: rows[4].seg.index) ?? original.termTheme
 
         var steps: [String] = []
         if wm != original.wm {
@@ -757,9 +768,8 @@ final class OptionsTabView: NSView, ScrollStepTab {
         if fullscreen != original.fullscreen {
             steps.append("\(HOME)/.local/bin/omacosy-solo-fullscreen \(fullscreen ? "on" : "off")")
         }
-        if autoTheme != original.autoTheme {
-            let v = ["off", "on desktop-only", "on"][autoTheme.rawValue]
-            steps.append("\(HOME)/.local/bin/omacosy-auto-theme \(v)")
+        if termTheme != original.termTheme {
+            steps.append("\(HOME)/.local/bin/omacosy-term-auto-theme \(termTheme == .follow ? "on" : "off")")
         }
 
         guard !steps.isEmpty else {
@@ -1768,6 +1778,24 @@ struct ThemeCell: Equatable {
     let title: String
     let isCustom: Bool
     let paletteFile: String
+    // a named edition: its immutable record id; nil on stock and raw cells
+    var editionID: String?
+    // a raw wallpaper with editions: how many variations hang off its source
+    var variations: Int
+    var storedColors: [NSColor]
+
+    init(logical: String, wallpaper: String, title: String, isCustom: Bool,
+         paletteFile: String, editionID: String? = nil, variations: Int = 0,
+         storedColors: [NSColor] = []) {
+        self.logical = logical
+        self.wallpaper = wallpaper
+        self.title = title
+        self.isCustom = isCustom
+        self.paletteFile = paletteFile
+        self.editionID = editionID
+        self.variations = variations
+        self.storedColors = storedColors
+    }
 }
 
 func stableHash(_ s: String) -> String {
@@ -1813,28 +1841,95 @@ func stockVariants() -> [ThemeCell] {
     return out
 }
 
-func customWallpaperDir() -> String? {
-    let (code, out) = shell("\(HOME)/.local/bin/omacosy-custom-theme dir 2>/dev/null")
-    let d = out.trimmingCharacters(in: .whitespacesAndNewlines)
-    return (code == 0 && !d.isEmpty) ? d : nil
+// symlink-canonical spelling, so a raw entry and an edition's recorded
+// provenance match even when one is /tmp and the other /private/tmp
+func canonicalPath(_ path: String) -> String {
+    URL(fileURLWithPath: path).resolvingSymlinksInPath().path
 }
 
+// --- theme editions ---------------------------------------------------------
+
+struct ThemeEdition {
+    let id: String
+    let name: String
+    let primary: Bool
+    let sourcePath: String?
+    let media: String?
+    let colors: [NSColor]
+}
+
+// What the editor and the grid need from the record store: id, name,
+// provenance and the stored palette. `theme list --json` is the library's
+// own answer, so the tab and the CLI can never disagree.
+func allEditions() -> [ThemeEdition] {
+    let (code, out) = shell("\(HOME)/.local/bin/omacosy-themecore theme list --json 2>/dev/null")
+    guard code == 0, let data = out.data(using: .utf8),
+          let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+    return rows.compactMap { row in
+        guard let id = row["id"] as? String, let name = row["name"] as? String else { return nil }
+        let wall = row["wallpaper"] as? [String: Any] ?? [:]
+        let palette = row["palette"] as? [String: Any] ?? [:]
+        let hexes = palette["colors"] as? [String] ?? []
+        return ThemeEdition(id: id, name: name,
+                            primary: (row["primary"] as? Bool) ?? false,
+                            sourcePath: wall["path"] as? String,
+                            media: wall["media"] as? String,
+                            colors: hexes.compactMap(hexColor))
+    }
+}
+
+// The edition's own snapshot wins; the recorded source is the fallback. A
+// record with neither left in place cannot be applied, so it gets no cell.
+func editionImage(_ e: ThemeEdition) -> String? {
+    if let m = e.media, !m.isEmpty, !m.contains("/") {
+        let p = HOME + "/.local/share/omacosy/theme-media/" + m
+        if FileManager.default.fileExists(atPath: p) { return p }
+    }
+    if let s = e.sourcePath, FileManager.default.fileExists(atPath: s) { return s }
+    return nil
+}
+
+// Every wallpaper in the configured folder is an auto-theme
+// (`Wallpaper #N`); named editions always sit on top.
 func customVariants() -> [ThemeCell] {
-    guard (readConfKey(AUTOCONF, "auto-theme") ?? "off") == "on", let dir = customWallpaperDir() else { return [] }
+    let dir = wallpapersDir()
     let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
         .filter { isImageFile($0) }.sorted()
-    return files.enumerated().map { i, f in
-        ThemeCell(logical: "custom", wallpaper: dir + "/" + f,
-                  title: "Custom #\(i + 1)", isCustom: true, paletteFile: "")
+    let editions = allEditions()
+
+    var bySource: [String: Int] = [:]
+    for e in editions {
+        guard let src = e.sourcePath else { continue }
+        bySource[canonicalPath(src), default: 0] += 1
     }
+
+    var out: [ThemeCell] = []
+    // named editions A→Z on top; the raw entries stay below in today's
+    // lexicographic order and are numbered over the full sorted list
+    let sorted = editions.sorted {
+        let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
+        return cmp == .orderedSame ? $0.id < $1.id : cmp == .orderedAscending
+    }
+    for e in sorted {
+        guard let img = editionImage(e) else { continue }
+        out.append(ThemeCell(logical: "custom", wallpaper: img, title: e.name,
+                             isCustom: true, paletteFile: "",
+                             editionID: e.id, storedColors: e.colors))
+    }
+    for (i, f) in files.enumerated() {
+        let p = dir + "/" + f
+        out.append(ThemeCell(logical: "custom", wallpaper: p,
+                             title: "Wallpaper #\(i + 1)", isCustom: true, paletteFile: "",
+                             variations: bySource[canonicalPath(p), default: 0]))
+    }
+    return out
 }
 
 // --- wallpapers tab data ---------------------------------------------------
 
 // The configured folder, read from the CLI so the dashboard and
-// `omacosy-custom-theme status` can never disagree. status prints the path
-// even while auto-theme is off, which is what lets this tab work before the
-// feature is switched on.
+// `omacosy-custom-theme status` can never disagree. status answers even
+// when terminal following is off, so this tab never depends on a switch.
 func wallpapersDir() -> String {
     let (_, out) = shell("\(HOME)/.local/bin/omacosy-custom-theme status 2>/dev/null")
     for line in out.split(separator: "\n") {
@@ -1951,7 +2046,17 @@ func thumbnail(_ path: String, maxPixel: Int = 360) -> NSImage? {
 }
 
 func applyTheme(_ c: ThemeCell, done: @escaping () -> Void) {
-    let cmd = "\(HOME)/.local/bin/omacosy-theme-switch set \(c.logical) \(shellQuote(c.wallpaper))"
+    // a named edition applies through its record, a raw wallpaper through
+    // the derived dir, a stock theme through its logical name
+    let cmd: String
+    if let id = c.editionID {
+        let json = HOME + "/.config/omacosy/themes/" + id + ".json"
+        cmd = "\(HOME)/.local/bin/omacosy-theme-switch set-theme \(shellQuote(json))"
+    } else if c.isCustom {
+        cmd = "\(HOME)/.local/bin/omacosy-theme-switch set-raw \(shellQuote(c.wallpaper))"
+    } else {
+        cmd = "\(HOME)/.local/bin/omacosy-theme-switch set \(c.logical) \(shellQuote(c.wallpaper))"
+    }
     DispatchQueue.global().async {
         _ = shell(cmd)
         DispatchQueue.main.async { done() }
@@ -1961,13 +2066,11 @@ func applyTheme(_ c: ThemeCell, done: @escaping () -> Void) {
 final class ThemeGridView: NSView {
     var cells: [ThemeCell] = []
     var customDir: String?
-    var isCustomOn = false
     var thumbs: [Int: NSImage] = [:]
     var palettes: [Int: [NSColor]] = [:]
     var pending: Set<Int> = []
     var cellFrames: [Int: NSRect] = [:]
     var headers: [(NSRect, String)] = []
-    var lockedMessageRect = NSRect.zero
     var onApplied: ((String) -> Void)?
     private var hoveredIndex: Int?
     private var hoverTracking: NSTrackingArea?
@@ -2017,9 +2120,10 @@ final class ThemeGridView: NSView {
             top += 6
         }
 
-        // custom section
+        // custom section: every wallpaper is an auto-theme, so the section
+        // shows whenever there is anything to show — no switch state gates it
         let customIdx = cells.enumerated().filter { $0.element.isCustom }.map { $0.offset }
-        if isCustomOn {
+        if !customIdx.isEmpty {
             // a rule between the Omarchy grid and the custom grid, so the two
             // galleries read as separate sections
             top += 22
@@ -2030,9 +2134,6 @@ final class ThemeGridView: NSView {
             top += headerH + 8
             for i in customIdx { placeCell(i) }
             endRow()
-        } else {
-            lockedMessageRect = NSRect(x: 0, y: top, width: W, height: 44)
-            top += 44
         }
 
         // convert top-coords to non-flipped bottom coords
@@ -2042,7 +2143,6 @@ final class ThemeGridView: NSView {
         }
         for (k, v) in cellFrames { cellFrames[k] = flip(v) }
         headers = headers.map { (flip($0.0), $0.1) }
-        if !isCustomOn { lockedMessageRect = flip(lockedMessageRect) }
         customHeaderRect = flip(customHeaderRect)
         separatorRect = flip(separatorRect)
 
@@ -2064,7 +2164,8 @@ final class ThemeGridView: NSView {
         DispatchQueue.global().async { [weak self] in
             let img = thumbnail(c.wallpaper)
             let pal: [NSColor]
-            if c.isCustom { pal = customPalette(c.wallpaper) }
+            if !c.storedColors.isEmpty { pal = c.storedColors }
+            else if c.isCustom { pal = customPalette(c.wallpaper) }
             else { pal = parseColorsToml(c.paletteFile) }
             DispatchQueue.main.async {
                 // a reload may have reshuffled the cells while this was in
@@ -2086,12 +2187,7 @@ final class ThemeGridView: NSView {
             drawMidLeft(title, nerdFont("Bold", 13), palette.accent,
                         x: 0, midTop: bounds.height - r.midY, height: bounds.height)
         }
-        if !isCustomOn {
-            drawTopLeft("Turn on Auto-Theme to preview your wallpapers",
-                        nerdFont("Regular", 12), palette.muted,
-                        x: 0, top: bounds.height - lockedMessageRect.maxY + 8, height: bounds.height)
-        }
-        if isCustomOn {
+        if cells.contains(where: { $0.isCustom }) {
             palette.muted.withAlphaComponent(0.25).setFill()
             separatorRect.fill()
         }
@@ -2133,9 +2229,20 @@ final class ThemeGridView: NSView {
             thumb.stroke()
         }
 
-        let title = truncate(cells[i].title, nerdFont("Regular", 11), f.width)
-        drawTopLeft(title, nerdFont("Regular", 11), palette.label,
-                    x: f.minX, top: bounds.height - (f.minY + paletteH + labelH), height: bounds.height)
+        let titleFont = nerdFont("Regular", 11)
+        let badgeFont = nerdFont("Regular", 10)
+        let n = cells[i].variations
+        let badge = n > 0 ? "· \(n) variation\(n == 1 ? "" : "s")" : ""
+        let badgeW = badge.isEmpty ? 0 : advance(badge, badgeFont) + 8
+        let title = truncate(cells[i].title, titleFont, f.width - badgeW)
+        let titleTop = bounds.height - (f.minY + paletteH + labelH)
+        drawTopLeft(title, titleFont, palette.label,
+                    x: f.minX, top: titleTop, height: bounds.height)
+        if !badge.isEmpty {
+            drawTopLeft(badge, badgeFont, palette.muted,
+                        x: f.minX + advance(title, titleFont) + 8,
+                        top: titleTop, height: bounds.height)
+        }
 
         // palette strip along the bottom
         let colors = palettes[i] ?? []
@@ -2260,6 +2367,7 @@ final class ThemesTabView: NSView, ScrollStepTab {
         var paths: [String] = []
         if let r = repoDir() { paths.append(r + "/themes") }
         if let d = grid.customDir { paths.append(d) }
+        paths.append(HOME + "/.config/omacosy/themes")
         paths.append(HOME + "/.config/omacosy/themes.conf")
         for p in paths where !watchedPaths.contains(p) {
             watchedPaths.append(p)
@@ -2271,15 +2379,14 @@ final class ThemesTabView: NSView, ScrollStepTab {
 
     func reload() {
         let cells = stockVariants() + customVariants()
-        let dir = customWallpaperDir()
-        let isOn = (readConfKey(AUTOCONF, "auto-theme") ?? "off") == "on"
+        let dir = wallpapersDir()
 
         // Re-entering the tab re-reads the shelves. When nothing changed,
         // leave the decoded thumbnails and palettes exactly as they are:
         // clearing them repaints a grid of "loading…" placeholders for a
         // frame, which reads as a flicker when the gallery is already at
         // the top and no scroll motion hides it.
-        if cells == grid.cells, dir == grid.customDir, isOn == grid.isCustomOn {
+        if cells == grid.cells, dir == grid.customDir {
             needsGridRebuild = true
             needsLayout = true
             return
@@ -2296,7 +2403,6 @@ final class ThemesTabView: NSView, ScrollStepTab {
 
         grid.cells = cells
         grid.customDir = dir
-        grid.isCustomOn = isOn
 
         var thumbs: [Int: NSImage] = [:]
         var palettes: [Int: [NSColor]] = [:]

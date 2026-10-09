@@ -9,11 +9,10 @@ THEMES_DIR="$REPO_DIR/themes"
 themes=()
 for t in "$THEMES_DIR"/*/; do themes+=("$(basename "$t")"); done
 
-# The custom theme comes LAST, after every shipped one, and only when
-# omacosy-auto-theme is on and there is something to show: its wallpaper
-# directory has to hold at least one image. omacosy-custom-theme owns that rule and exits
-# 1 silently when it is not met, so a machine that never opted in cycles
-# the four shipped themes exactly as before.
+# The custom theme comes LAST, after every shipped one, when its wallpaper
+# directory holds at least one image. omacosy-custom-theme owns that rule and exits
+# 1 silently when it is not met, so a machine with no pictures of its own
+# cycles the four shipped themes exactly as before.
 CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
 if [ -x "$CUSTOM" ] && "$CUSTOM" dir >/dev/null 2>&1; then themes+=("custom"); fi
 

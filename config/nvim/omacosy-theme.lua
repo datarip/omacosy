@@ -1,6 +1,6 @@
 -- omacosy-theme.lua — Neovim follows omacosy's custom theme.
 --
--- `omacosy-auto-theme on` links this file into ~/.config/nvim/lua/plugins/,
+-- `omacosy-term-auto-theme on` links this file into ~/.config/nvim/lua/plugins/,
 -- and `off` removes the link. While a custom theme is on screen, omacosy
 -- writes ~/.config/omacosy/nvim/palette.lua, and this builds a base16
 -- colourscheme from it with mini.base16. On a stock theme that file is gone

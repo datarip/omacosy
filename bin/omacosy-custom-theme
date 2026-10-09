@@ -23,9 +23,9 @@
 # theme-set and theme-bg-next call them so the rules below live in ONE
 # place. Everything else is for a person.
 #
-# The whole feature needs `omacosy-auto-theme on` AND the directory holding
-# images. Both are off on a new install, so a user who never asks for it
-# cannot tell this is installed.
+# The custom theme exists whenever the directory holds images. The terminal
+# tools follow it only when `omacosy-term-auto-theme on` asks; a machine
+# with no pictures cannot tell this is installed.
 set -euo pipefail
 
 CONF="$HOME/.config/omacosy/themes.conf"
@@ -40,7 +40,6 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 THEMES_DIR="$REPO_DIR/themes"
 THEME_SET="$REPO_DIR/bin/theme-set"
 THEME_BG_NEXT="$REPO_DIR/bin/theme-bg-next"
-AUTO_THEME="$REPO_DIR/bin/omacosy-auto-theme"
 
 # The stock themes take upstream's list. The custom theme adds gif.
 # Measured 2026-09-18: macOS accepts an animated gif as the desktop
@@ -96,11 +95,7 @@ images() {
 
 # ------------------------------------------------------------- commands
 
-# omacosy-auto-theme owns the switch; this asks it rather than reading its file
-enabled() { [ -x "$AUTO_THEME" ] && "$AUTO_THEME" enabled 2>/dev/null; }
-
 cmd_dir() {
-  enabled || return 1
   local d; d="$(wallpaper_dir)"
   # Absent and empty are the SAME case: the custom theme does not exist.
   # Silent, because the normal state of a machine that never opted in is
@@ -213,8 +208,7 @@ resolve_spec() {
     [ -f "$spec" ] || { echo "no such file: $spec" >&2; return 1; }
     case "$spec" in
       "$THEMES_DIR"/*) printf '%s %s\n' "$(basename "$(dirname "$(dirname "$spec")")")" "$spec" ;;
-      *) enabled || { echo "auto-theme is off, so no custom wallpaper: $spec" >&2; return 1; }
-         printf 'custom %s\n' "$spec" ;;
+      *) printf 'custom %s\n' "$spec" ;;
     esac
     return 0
   fi
@@ -234,9 +228,8 @@ resolve_spec() {
       ;;
   esac
 
-  # A filename in the custom wallpaper directory. While auto-theme is off it
-  # names nothing, so the appearance agent leaves the stock theme on screen.
-  enabled || { echo "auto-theme is off, so no custom wallpaper: $spec" >&2; return 1; }
+  # A filename in the custom wallpaper directory. It resolves whenever the
+  # file is there; the terminal-following switch plays no part.
   d="$(wallpaper_dir)"
   [ -f "$d/$spec" ] || { echo "not a stock theme, and no such file in $d: $spec" >&2; return 1; }
   printf 'custom %s\n' "$d/$spec"
@@ -332,9 +325,7 @@ cmd_status() {
   else
     echo "  set by            : default (no $CONF)"
   fi
-  if ! enabled; then
-    echo "  state             : hidden — omacosy-auto-theme is off"
-  elif [ ! -d "$d" ]; then
+  if [ ! -d "$d" ]; then
     echo "  state             : MISSING — the custom theme is not in the cycle"
   else
     n="$(images "$d" | wc -l | tr -d ' ')"

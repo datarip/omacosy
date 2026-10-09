@@ -15,8 +15,8 @@ CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
 STATE_DIR="$HOME/.local/state/omacosy"
 CUSTOM_INDEX="$STATE_DIR/custom-index"
 
-# "custom" is listed only while omacosy-auto-theme is on and its wallpaper
-# directory holds an image. omacosy-custom-theme owns that rule.
+# "custom" is listed whenever its wallpaper directory holds an image.
+# omacosy-custom-theme owns that rule.
 have_custom() { [ -x "$CUSTOM" ] && "$CUSTOM" dir >/dev/null 2>&1; }
 names() { for t in "$THEMES_DIR"/*/; do basename "$t"; done; have_custom && echo custom; }
 
@@ -49,9 +49,6 @@ if [ "$NAME" = custom ] && have_custom; then
   printf '%s\n' "$IMG" > "$CUSTOM_INDEX"
 elif [ -d "$THEMES_DIR/$NAME" ]; then
   THEME_DIR="$THEMES_DIR/$NAME"
-  # where `omacosy-auto-theme off` goes back to when a custom theme is showing
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$NAME" > "$STATE_DIR/last-stock-theme"
 else
   echo "theme-set: unknown theme '$NAME'. Available:" >&2
   names >&2
@@ -133,8 +130,9 @@ PY
 fi
 
 # The apps follow a custom theme and show their own colours on a stock one.
-# The rules and the guards live in omacosy-auto-theme, because theme-bg-next
-# has to do exactly the same thing when it moves to the next wallpaper.
-"$REPO_DIR/bin/omacosy-auto-theme" apply "$NAME" || true
+# The rules and the guards live in omacosy-term-auto-theme, because
+# theme-bg-next has to do exactly the same thing when it moves to the next
+# wallpaper.
+"$REPO_DIR/bin/omacosy-term-auto-theme" apply "$NAME" || true
 
 echo "theme: $NAME"

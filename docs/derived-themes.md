@@ -674,20 +674,21 @@ ln -sfn "$(readlink ~/.config/omarchy/current/theme)" ~/.config/omarchy/current/
 
 ## 6. Setting it up
 
-**Turn on auto-theme, then put images in the directory.**
+**Put images in the directory.**
 
 ```sh
-omacosy-auto-theme on
 mkdir -p ~/Pictures/wallpapers
 cp ~/Downloads/some-wallpapers/*.jpg ~/Pictures/wallpapers/
 ```
 
-`install.sh` creates that directory for you, empty. Auto-theme is off on a
-new install. The same switch makes the terminal and its apps follow the
-wallpaper: [auto-theme.md](auto-theme.md).
+`install.sh` creates that directory for you, empty. Whenever it holds at
+least one image, `Super+Shift+T` reaches a fifth theme, `custom`, after the
+four shipped ones; an empty directory keeps the cycle at four themes. The
+desktop, the bar, the ring and the cheat sheet always follow it. The terminal
+and its apps follow only if you ask them to with `omacosy-term-auto-theme on`:
+[auto-theme.md](auto-theme.md).
 
-`Super+Shift+T` now reaches a fifth theme, `custom`, after the four
-shipped ones. `Super+Shift+B` inside it moves through your images, and
+`Super+Shift+B` inside `custom` moves through your images, and
 every press recolours the bar, the pills, the icons and the focus ring.
 
 Check what omacosy sees:

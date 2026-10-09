@@ -1,4 +1,4 @@
-# starship prompt for omacosy's terminal theming. omacosy-auto-theme copies this
+# starship prompt for omacosy's terminal theming. omacosy-term-auto-theme copies this
 # file to ~/.config/omacosy/starship.toml and appends the palette of the theme
 # on screen, so the prompt recolours with the desktop.
 #
@@ -9,7 +9,7 @@
 # without them draws blanks.
 #
 # Edit ~/.config/starship.toml instead if you want a prompt of your own; this
-# file is only used while `omacosy-auto-theme` is on.
+# file is only used while `omacosy-term-auto-theme` is on.
 
 "$schema" = 'https://starship.rs/config-schema.json'
 add_newline = false

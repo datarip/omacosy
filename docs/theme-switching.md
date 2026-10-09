@@ -190,7 +190,7 @@ is crisp.
   ring, but they are separate programs that must rewrite their configs and
   reload, so they settle about a second later.
 - It depends on the custom/auto themes (`omacosy-custom-theme`,
-  `omacosy-auto-theme`), which are not upstream yet, so it is a fork-only
+  `omacosy-term-auto-theme`), which are not upstream yet, so it is a fork-only
   feature for now.
 
 ## 6. Files

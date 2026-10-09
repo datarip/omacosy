@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 THEMES_DIR="$REPO_DIR/themes"
 CUSTOM="$REPO_DIR/bin/omacosy-custom-theme"
-AUTO_THEME="$REPO_DIR/bin/omacosy-auto-theme"
+TERM_AUTO_THEME="$REPO_DIR/bin/omacosy-term-auto-theme"
 HELPER="$HOME/.local/bin/omacosy-helper"
 OVERLAY_BIN="$HOME/.local/bin/omacosy-overlay"
 THEMECORE="$HOME/.local/bin/omacosy-themecore"
@@ -36,7 +36,6 @@ TARGET_FILE="$STATE_DIR/overlay-target"
 PENDING_THEME="$STATE_DIR/pending-theme"
 PENDING_WALL="$STATE_DIR/pending-wallpaper"
 CUSTOM_INDEX="$STATE_DIR/custom-index"
-LAST_STOCK="$STATE_DIR/last-stock-theme"
 BACKGROUND_LINK="$STATE_DIR/background"
 SETTLER_PID="$STATE_DIR/settler.pid"
 APPLY_PID="$STATE_DIR/apply.pid"
@@ -118,7 +117,6 @@ record_switch() {
   case "$logical" in
     custom)  printf '%s\n' "${index:-$wall}" > "$CUSTOM_INDEX" ;;
     theme:*) [ -n "$index" ] && printf '%s\n' "$index" > "$CUSTOM_INDEX" ;;
-    *)       printf '%s\n' "$logical" > "$LAST_STOCK" ;;
   esac
 }
 
@@ -131,9 +129,9 @@ apply_apps() {
   local logical="$1" theme_dir="$2"
   kill "$(cat "$APPLY_PID" 2>/dev/null || true)" 2>/dev/null || true
   if [ "${logical#theme:}" != "$logical" ]; then
-    ( "$AUTO_THEME" apply-theme "$theme_dir" "$logical" >/dev/null 2>&1 || true ) &
+    ( "$TERM_AUTO_THEME" apply-theme "$theme_dir" "$logical" >/dev/null 2>&1 || true ) &
   else
-    ( "$AUTO_THEME" apply "$logical" >/dev/null 2>&1 || true ) &
+    ( "$TERM_AUTO_THEME" apply "$logical" >/dev/null 2>&1 || true ) &
   fi
   echo $! > "$APPLY_PID"
 }

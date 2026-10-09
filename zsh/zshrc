@@ -19,7 +19,7 @@ compinit -C
 # everything personal lives here; keep this file distributable
 [ -f "$HOME/.zshrc.local" ] && source "$HOME/.zshrc.local"
 
-# Directory colour and the generated prompt, while omacosy-auto-theme is on.
+# Directory colour and the generated prompt, while omacosy-term-auto-theme is on.
 # Sourced BEFORE starship so STARSHIP_CONFIG is already set when it starts.
 # term-env.d/ is for anything else that exports colours: a tool drops a file
 # there and its variables are refreshed on a theme switch along with ours.

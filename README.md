@@ -340,15 +340,20 @@ file loads `~/.zshrc.local`.
 ## Settings
 
 `Super`+`,` opens a cheatsheet-style modal — the same card as `Super`+`k` —
-with four tabs:
+with seven tabs:
 
 - **Options** — the window manager (AeroSpace or OmniWM), window corners,
-  menu-bar mode, fullscreen, and auto-theme.
+  menu-bar mode, fullscreen, and terminal auto-theme.
 - **Workspaces** — which apps open on which workspace, per display, with a
   searchable picker. **Save** writes `~/.config/omacosy/settings.conf`, runs
   `omacosy-settings`, and drops any app rule you removed (under OmniWM that
   also prunes the manager's own rule).
 - **Themes** — every theme as a card with its colours; click one to apply it.
+- **Wallpapers** — wallhaven.cc browsing; the tab is the shell until its
+  Phase 7 lands.
+- **Storage** — the local wallpapers folder: where it is, a button that opens
+  it, **Add Images** and **Set Folder**.
+- **API Keys** — the wallhaven.cc API key, masked, stored locally.
 - **Update** — `omacosy-update --check`, with the install button behind it.
 
 It reads and writes the same files and commands as the CLI, so the window and
@@ -373,7 +378,7 @@ The commands you run:
 | `omacosy-solo-fullscreen on\|off\|status` | a workspace with one tiled window fills the display. Off by default |
 | `omacosy-window-corners [square\|round\|<radius>]` | sets the radius macOS draws window corners with; the `Super+K` cheatsheet, the popup panel under a bar pill and the Settings card (theme thumbnails included) follow it. No argument shows it |
 | `omacosy-harvest-zshrc` | moves the lines installers appended to `~/.zshrc` into `~/.zshrc.local` |
-| `omacosy-auto-theme on\|off\|status` | whether your own wallpapers become themes, with the terminal and its tools to match. `on desktop-only` themes the desktop alone. Off by default |
+| `omacosy-term-auto-theme on\|off\|status` | whether the terminal and its tools follow the wallpaper theme. Off by default; the desktop, the bar, the ring and the cheat sheet always follow |
 | `theme-set <name>` | switches the whole theme |
 | `theme-next` | the next theme (Super+Shift+T) |
 | `theme-bg-next [path]` | the next wallpaper of the theme, or the image you name (Super+Shift+B) |
@@ -393,7 +398,7 @@ The keys and the daemons run these. You do not need to run them:
 | `omacosy-open` | opens a URL, a file, or a scheme (`mailto`) with its macOS default app. Super+Shift+E runs `omacosy-open mailto` for mail |
 | `omacosy-finder-window` | Super+Shift+F: a new Finder window on this workspace |
 | `omacosy-files` | Super+Shift+Y: yazi in a new terminal window |
-| `omacosy-auto-theme apply` | `theme-set`, `theme-bg-next` and `omacosy-theme-switch`, when auto-theme is on |
+| `omacosy-term-auto-theme apply` | `theme-set`, `theme-bg-next` and `omacosy-theme-switch`, after every switch |
 | `omacosy-theme-switch` | Super+Shift+T and Super+Shift+B: the instant, synced switch |
 | `omacosy-focus-guard` | AeroSpace, on each workspace change: it undoes a switch that an app caused by activating itself |
 | `omacosy-ws-collapse` | the bar, when a display is unplugged or plugged back in |
@@ -421,7 +426,7 @@ The keys and the daemons run these. You do not need to run them:
 | Prompt | starship | `config/starship.toml` |
 | Shell | zsh | `zsh/zshrc` + your `~/.zshrc.local` |
 | CLI stack | fzf, eza, zoxide, ripgrep, bat, lazygit, btop | wired in `zsh/zshrc` |
-| More terminal tools, opt-in | `./install.sh --tui-tools` installs neovim, git-delta, tmux and fastfetch, the tools `omacosy-auto-theme` colours beyond the ones above. Only the missing ones are installed, and `uninstall.sh` removes what it added | `install.sh` |
+| More terminal tools, opt-in | `./install.sh --tui-tools` installs neovim, git-delta, tmux and fastfetch, the tools `omacosy-term-auto-theme` colours beyond the ones above. Only the missing ones are installed, and `uninstall.sh` removes what it added | `install.sh` |
 | Files, opt-in | yazi on `Super+shift+y`. `./install.sh --yazi` installs it with fd, poppler, resvg and sevenzip for its previews; `--yazi-full` adds ffmpeg-full, imagemagick-full and the symbols font. Without either flag nothing is installed and the key stays unbound | run `yazi` in a terminal |
 
 Why so much of it is self-built:
@@ -677,21 +682,21 @@ Four themes means four color schemes, and they were chosen to suit their
 own wallpapers. A picture of your own gets whichever scheme you were on,
 which is how you end up with osaka-jade's dark green pills on a red bar.
 
-Turn on `omacosy-auto-theme`, put images in `~/Pictures/wallpapers`, and
+Put images in `~/Pictures/wallpapers` and
 `Super+Shift+T` reaches a fifth theme, `custom`, after the four. Inside it **every wallpaper is its own
 theme**: `Super+Shift+B` moves to the next picture and recomputes the bar
-color, the pill color, the icon color and the focus ring from it.
+color, the pill color, the icon color and the focus ring from it. The
+terminal and its apps follow only when you ask them to (see *Terminal
+auto-theme* below).
 
 ```sh
-omacosy-auto-theme on
 mkdir -p ~/Pictures/wallpapers      # install.sh already made it
 cp ~/Downloads/walls/*.jpg ~/Pictures/wallpapers/
 omacosy-custom-theme status
 ```
 
-That is the whole setup. It is off on a new install. While it is off, or
-while the directory is empty, the cycle stays four themes and nothing is
-printed.
+That is the whole setup. With an empty directory the cycle stays four themes
+and nothing is printed.
 
 **How the colors are chosen.** The bar's own background keeps the
 measurement omacosy already makes to match the real macOS menu bar — a
@@ -734,27 +739,31 @@ omacosy-custom-theme follow on
 Either may name a shipped theme, one of its wallpapers, or a file of your
 own. Full manual: **[docs/derived-themes.md](docs/derived-themes.md)**.
 
-### Auto-theme: the terminal and its apps follow your wallpaper
+### Terminal auto-theme: your tools follow the wallpaper
 
 Off by default, because a terminal's colors are a personal choice:
 
 ```sh
-omacosy-auto-theme            # status
-omacosy-auto-theme on         # custom themes, and the apps follow them
-omacosy-auto-theme on desktop-only   # custom themes for the bar, ring and cheat sheet only
-omacosy-auto-theme off        # stock themes only; your own colors come back
+omacosy-term-auto-theme            # status
+omacosy-term-auto-theme on         # the terminal and its apps follow the wallpaper theme
+omacosy-term-auto-theme off        # they keep their own colors; the desktop still follows
 ```
 
-**Desktop only.** `on desktop-only` keeps the custom themes for the desktop,
-the bar, the focus ring and the cheat sheet, and leaves the terminal and every
-tool in its own colors, as on a stock theme. `on` alone turns the apps back
-on. It is stored as `apps = on | off` in `~/.config/omacosy/auto-theme.conf`.
+**The desktop always follows.** Every wallpaper in `~/Pictures/wallpapers` is
+a theme of its own in the `Super+Shift+T` cycle; the bar, the focus ring and
+the cheat sheet take its colors with no switch to set. The command above only
+decides whether that theme extends to the terminal. It is stored as
+`terminal = on | off` in `~/.config/omacosy/term-auto-theme.conf`. Before
+2026-10-09 the switch was `omacosy-auto-theme`, and `off` hid the custom
+theme entirely; that master switch is gone. It fixed a state where the
+Themes tab showed wallpapers the keyboard cycle refused, and where
+`Super+Shift+B` could error after an explicit apply. The before/after table
+and the full reasoning: [docs/auto-theme.md](docs/auto-theme.md).
 
-`on` makes the **custom** theme appear (see *Your own wallpapers* above).
-While a custom theme is on screen, the terminal and its apps take the colors
-of the same wallpaper. The 16 terminal colors are derived from the picture,
-and red, green, yellow, blue, magenta and cyan keep their hue, so an error
-message still reads as red.
+While a custom theme is on screen and the terminal follows it, the terminal
+and its apps take the colors of the same wallpaper. The 16 terminal colors
+are derived from the picture, and red, green, yellow, blue, magenta and cyan
+keep their hue, so an error message still reads as red.
 
 A **stock** theme changes none of this. When one is on screen, every generated
 file is removed and each app shows its own colors again.
@@ -766,7 +775,7 @@ file is removed and each app shows its own colors again.
 | `ls`, `eza` | the directory color, in the accent | at once | none |
 | yazi | directories and folder icons in the accent, markers, borders | when it opens | none |
 | btop | meters from green to red, highlights in the accent, the terminal's own background | at once | none |
-| Neovim | a base16 colorscheme from the palette, the terminal's own background | at once | `on` links the plugin |
+| Neovim | a base16 colorscheme from the palette, the terminal's own background | at once | `omacosy-term-auto-theme on` links the plugin |
 | bat, delta | code in the 16 colors | at once | none |
 | delta | the added and removed line strips, in the palette's green and red | at once | `[include] path = ~/.config/omacosy/delta.gitconfig` in `~/.gitconfig` |
 | fzf, lazygit, fastfetch | accent, borders, selection | the next time they run | none |
@@ -782,7 +791,7 @@ background shows the same transparency as the shell.
 neovim, git-delta, tmux and fastfetch are not in the base install;
 `./install.sh --tui-tools` adds them.
 
-**Recommended with auto-theme: a transparent terminal.** Add these two lines
+**Recommended with terminal auto-theme: a transparent terminal.** Add these two lines
 to your own Ghostty config, `~/Library/Application Support/com.mitchellh.ghostty/config`,
 then quit and reopen Ghostty (on macOS a reload does not change the
 transparency):
@@ -812,14 +821,13 @@ an update replaces omacosy's file and keeps yours.
 | `~/.config/btop/themes/omacosy.theme` | btop, with `color_theme = "omacosy"` in `btop.conf`. A stock theme puts back btop's own theme |
 
 Your own Ghostty config is read **after** the generated one, so a color you
-set by hand still wins. `omacosy-auto-theme off` deletes the generated files,
+set by hand still wins. `omacosy-term-auto-theme off` deletes the generated files,
 and the next window reads your own colors again.
 
-**Handing the terminal to another tool.** `~/.config/omacosy/auto-theme.conf`:
+**Handing the terminal to another tool.** `~/.config/omacosy/term-auto-theme.conf`:
 
 ```
-auto-theme = on | off         off by default
-apps = on | off               on by default; off: the desktop only (on desktop-only)
+terminal = on | off           off by default; on: the terminal and its apps follow
 applier = <command>           empty: omacosy writes the config itself
 ```
 

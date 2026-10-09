@@ -1981,6 +1981,17 @@ func hexColor(_ s: String) -> NSColor? {
     return color(fromARGB: 0xff000000 | v)
 }
 
+// WCAG relative luminance, so the Edit pill can pick a label colour that
+// stays readable on the accent fill. 0.179 is the sRGB pivot where black
+// and white trade places.
+func relativeLuminance(_ c: NSColor) -> CGFloat {
+    let s = c.usingColorSpace(.sRGB) ?? c
+    func lin(_ v: CGFloat) -> CGFloat {
+        v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+    }
+    return 0.2126 * lin(s.redComponent) + 0.7152 * lin(s.greenComponent) + 0.0722 * lin(s.blueComponent)
+}
+
 func parseColorsToml(_ path: String) -> [NSColor] {
     guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
     var map: [String: String] = [:]
@@ -2072,6 +2083,8 @@ final class ThemeGridView: NSView {
     var cellFrames: [Int: NSRect] = [:]
     var headers: [(NSRect, String)] = []
     var onApplied: ((String) -> Void)?
+    // the Edit pill's click: opens the Theme Editor on this cell
+    var onEdit: ((ThemeCell) -> Void)?
     private var hoveredIndex: Int?
     private var hoverTracking: NSTrackingArea?
 
@@ -2081,6 +2094,11 @@ final class ThemeGridView: NSView {
     private let cellH: CGFloat = 180
     private let gapX: CGFloat = 14
     private let gapY: CGFloat = 16
+    private let cellPaletteH: CGFloat = 12
+    private let cellLabelH: CGFloat = 18
+    private let cellThumbGap: CGFloat = 12
+    private let pillH: CGFloat = 22
+    private let pillInset: CGFloat = 8
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2197,13 +2215,10 @@ final class ThemeGridView: NSView {
     }
 
     private func drawCell(_ i: Int, _ f: NSRect) {
-        let paletteH: CGFloat = 12
-        let labelH: CGFloat = 18
         // leave room under the thumbnail for the hover ring (2 px) plus air
         // before the theme name
-        let thumbGap: CGFloat = 12
-        let thumbRect = NSRect(x: f.minX, y: f.minY + paletteH + labelH + thumbGap,
-                               width: f.width, height: f.height - paletteH - labelH - thumbGap)
+        let thumbRect = NSRect(x: f.minX, y: f.minY + cellPaletteH + cellLabelH + cellThumbGap,
+                               width: f.width, height: f.height - cellPaletteH - cellLabelH - cellThumbGap)
         let thumbCorner = min(windowCornerRadius(7), min(thumbRect.width, thumbRect.height) / 2)
         let thumb = NSBezierPath(roundedRect: thumbRect, xRadius: thumbCorner, yRadius: thumbCorner)
         NSGraphicsContext.current?.saveGraphicsState()
@@ -2235,7 +2250,7 @@ final class ThemeGridView: NSView {
         let badge = n > 0 ? "· \(n) variation\(n == 1 ? "" : "s")" : ""
         let badgeW = badge.isEmpty ? 0 : advance(badge, badgeFont) + 8
         let title = truncate(cells[i].title, titleFont, f.width - badgeW)
-        let titleTop = bounds.height - (f.minY + paletteH + labelH)
+        let titleTop = bounds.height - (f.minY + cellPaletteH + cellLabelH)
         drawTopLeft(title, titleFont, palette.label,
                     x: f.minX, top: titleTop, height: bounds.height)
         if !badge.isEmpty {
@@ -2250,12 +2265,43 @@ final class ThemeGridView: NSView {
             let sw = f.width / CGFloat(colors.count)
             for (j, col) in colors.enumerated() {
                 col.setFill()
-                NSRect(x: f.minX + CGFloat(j) * sw, y: f.minY, width: sw + 0.5, height: paletteH).fill()
+                NSRect(x: f.minX + CGFloat(j) * sw, y: f.minY, width: sw + 0.5, height: cellPaletteH).fill()
             }
         } else {
             palette.itemBG.withAlphaComponent(0.5).setFill()
-            NSRect(x: f.minX, y: f.minY, width: f.width, height: paletteH).fill()
+            NSRect(x: f.minX, y: f.minY, width: f.width, height: cellPaletteH).fill()
         }
+
+        // the Edit pill, drawn only on the hovered custom cell: the door into
+        // the Theme Editor. No scrim — the picture stays fully visible.
+        if i == hoveredIndex, cells[i].isCustom {
+            let label = pillLabel(cells[i])
+            let pill = editPillRect(f, label: label)
+            let shape = NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6)
+            palette.accent.setFill()
+            shape.fill()
+            let ink = relativeLuminance(palette.accent) > 0.179 ? palette.barBG : palette.label
+            drawMidCenter(label, nerdFont("Bold", 11), ink,
+                          centerX: pill.midX, midTop: bounds.height - pill.midY, height: bounds.height)
+        }
+    }
+
+    // A named variation resumes a saved record; a raw wallpaper seeds a new
+    // one. The label says which, and the pill's width follows it.
+    private func pillLabel(_ c: ThemeCell) -> String {
+        c.editionID != nil ? "Edit" : "Customize"
+    }
+
+    // The pill sits over the picture's bottom-right corner. drawCell and
+    // mouseDown share this rect, so the hit test can never disagree with the
+    // pill that is on screen.
+    private func editPillRect(_ f: NSRect, label: String) -> NSRect {
+        let thumbRect = NSRect(x: f.minX, y: f.minY + cellPaletteH + cellLabelH + cellThumbGap,
+                               width: f.width, height: f.height - cellPaletteH - cellLabelH - cellThumbGap)
+        let w = advance(label, nerdFont("Bold", 11)) + 20
+        return NSRect(x: thumbRect.maxX - pillInset - w,
+                      y: thumbRect.minY + pillInset,
+                      width: w, height: pillH)
     }
 
     private func drawAspectFill(_ img: NSImage, in rect: NSRect) {
@@ -2276,9 +2322,12 @@ final class ThemeGridView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         for (i, f) in cellFrames where f.contains(p) {
             let c = cells[i]
-            let frame = f
-            // brief highlight
-            _ = frame
+            // a visible Edit/Customize pill takes the click; anywhere else
+            // applies the theme as before
+            if i == hoveredIndex, c.isCustom, editPillRect(f, label: pillLabel(c)).contains(p) {
+                onEdit?(c)
+                return
+            }
             applyTheme(c) { [weak self] in self?.onApplied?(c.title) }
             return
         }
@@ -2345,6 +2394,10 @@ final class ThemesTabView: NSView, ScrollStepTab {
             self?.status = "Applied \(title)"
             self?.needsDisplay = true
             self?.onApplied?()
+        }
+        grid.onEdit = { [weak self] cell in
+            guard let self, let w = self.window else { return }
+            ThemeEditor.present(cell: cell, from: w)
         }
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(visibleChanged),
@@ -2448,6 +2501,252 @@ final class ThemesTabView: NSView, ScrollStepTab {
             drawTopLeft(status, nerdFont("Regular", 11), palette.muted,
                         x: 0, top: bounds.height - 14, height: bounds.height)
         }
+    }
+}
+
+// --- theme editor ----------------------------------------------------------
+
+// The editor opens on one of two things: a stored edition (its record is
+// loaded from the library) or a new draft seeded from a raw wallpaper's
+// Magic palette. 5a-2 builds the shell and the door; the Palette Builder,
+// the previews and the Wallpaper Editor arrive in later sessions.
+enum EditorSubject {
+    case edition(ThemeEdition)
+    case draft(wallpaper: String)
+
+    var displayName: String {
+        switch self {
+        case .edition(let e): return e.name
+        case .draft(let w): return prettyWallName((w as NSString).lastPathComponent)
+        }
+    }
+}
+
+final class EditorWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+// One column of the editor card. The shell draws the header and leaves the
+// body to the panel that will own it.
+final class EditorColumnView: NSView {
+    var title = "" { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawMidLeft(title, nerdFont("Bold", 13), palette.accent,
+                    x: 16, midTop: 18, height: bounds.height)
+    }
+}
+
+final class ThemeEditorView: NSView {
+    var onClose: (() -> Void)?
+    var displayName = "" { didSet { needsDisplay = true } }
+    let paletteBuilder = EditorColumnView()
+    let previews = EditorColumnView()
+    let wallpaperEditor = EditorColumnView()
+
+    private let headerH: CGFloat = 56
+    private let leftW: CGFloat = 320
+    private let rightW: CGFloat = 340
+    private let closeSize: CGFloat = 24
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        paletteBuilder.title = "Palette Builder"
+        previews.title = "Previews"
+        wallpaperEditor.title = "Wallpaper Editor"
+        addSubview(paletteBuilder)
+        addSubview(previews)
+        addSubview(wallpaperEditor)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private var closeRect: NSRect {
+        NSRect(x: bounds.width - closeSize - 16,
+               y: bounds.height - headerH / 2 - closeSize / 2,
+               width: closeSize, height: closeSize)
+    }
+
+    override func layout() {
+        super.layout()
+        let h = max(0, bounds.height - headerH)
+        paletteBuilder.frame = NSRect(x: 0, y: 0, width: leftW, height: h)
+        previews.frame = NSRect(x: leftW, y: 0, width: max(0, bounds.width - leftW - rightW), height: h)
+        wallpaperEditor.frame = NSRect(x: bounds.width - rightW, y: 0, width: rightW, height: h)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // the same card chrome as the dashboard: bar background, accent rim
+        let corner = min(windowCornerRadius(10), min(bounds.width, bounds.height) / 2)
+        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: corner, yRadius: corner)
+        palette.barBG.setFill()
+        body.fill()
+        palette.accent.setStroke()
+        body.lineWidth = 1
+        body.stroke()
+
+        drawMidLeft("Theme Editor — \(displayName)", nerdFont("Bold", 14), palette.label,
+                    x: 20, midTop: headerH / 2, height: bounds.height)
+        drawMidCenter("✕", nerdFont("Regular", 12), palette.muted,
+                      centerX: closeRect.midX, midTop: headerH / 2, height: bounds.height)
+
+        // column rules, drawn last so they sit on every surface
+        palette.muted.withAlphaComponent(0.25).setFill()
+        NSRect(x: 0, y: bounds.height - headerH, width: bounds.width, height: 1).fill()
+        let columnH = max(0, bounds.height - headerH)
+        NSRect(x: leftW, y: 0, width: 1, height: columnH).fill()
+        NSRect(x: bounds.width - rightW, y: 0, width: 1, height: columnH).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if closeRect.contains(p) { onClose?() }
+    }
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { onClose?() }
+    }
+}
+
+final class ThemeEditor {
+    private static var current: ThemeEditor?
+
+    let window: EditorWindow
+    private let root: ThemeEditorView
+    private let subject: EditorSubject
+    private var keyMonitor: Any?
+    // what the later panels read: the edition's stored record, or the
+    // draft's Magic seed
+    private(set) var record: [String: Any]?
+    private(set) var magicColors: [String] = []
+    private(set) var magicRoles: [String: Any] = [:]
+
+    private init(subject: EditorSubject, size: NSSize) {
+        self.subject = subject
+        root = ThemeEditorView(frame: NSRect(origin: .zero, size: size))
+        window = EditorWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        root.displayName = subject.displayName
+        root.onClose = { [weak self] in self?.close() }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .popUpMenu
+        window.acceptsMouseMovedEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.contentView = root
+    }
+
+    // The Edit pill's front door. A named variation opens its saved record;
+    // a raw Wallpaper #N always starts a fresh draft seeded from its Magic
+    // palette — Customize never replaces an existing variation.
+    static func present(cell: ThemeCell, from host: NSWindow) {
+        guard let dash = host as? DashboardWindow else { return }
+        if let id = cell.editionID, let e = allEditions().first(where: { $0.id == id }) {
+            openEditor(.edition(e), from: dash)
+            return
+        }
+        openEditor(.draft(wallpaper: cell.wallpaper), from: dash)
+    }
+
+    private static func openEditor(_ subject: EditorSubject, from dash: DashboardWindow) {
+        current?.close()
+        let screen = dash.screen ?? NSScreen.main
+        let frame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let w = min(1280, frame.width - 80)
+        let h = min(800, frame.height - 80)
+        let editor = ThemeEditor(subject: subject, size: NSSize(width: w, height: h))
+        current = editor
+        editor.window.setFrameOrigin(NSPoint(x: frame.midX - w / 2, y: frame.midY - h / 2))
+        // the editor owns the session: outside clicks and the toggle key
+        // must not dismiss the dashboard until the editor is closed
+        dash.hideSuppressed = true
+        dash.addChildWindow(editor.window, ordered: .above)
+        editor.show()
+    }
+
+    // a theme switch repaints the card; the editor draws with the same
+    // global palette, so it must be marked dirty too
+    static func refreshColors() {
+        guard let e = current else { return }
+        e.root.needsDisplay = true
+        for v in e.root.subviews { v.needsDisplay = true }
+    }
+
+    // Esc on the dashboard while the editor is up means "close the editor,
+    // not the dashboard": a click on the card around the editor hands the
+    // keyboard back to the dashboard, and Esc must still return to Themes
+    @discardableResult
+    static func closeIfOpen() -> Bool {
+        guard let e = current else { return false }
+        e.close()
+        return true
+    }
+
+    private func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(root)
+        // Esc, wherever focus sits in the editor; the dashboard's own
+        // monitors ignore an Esc aimed at another window
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
+            guard let self, e.window === self.window else { return e }
+            if e.keyCode == 53 { self.close(); return nil }
+            return e
+        }
+        loadSubject()
+    }
+
+    private func loadSubject() {
+        switch subject {
+        case .edition(let e):
+            DispatchQueue.global().async { [weak self] in
+                let (code, out) = shell("\(HOME)/.local/bin/omacosy-themecore theme show "
+                    + shellQuote(e.id) + " 2>/dev/null")
+                guard code == 0, let data = out.data(using: .utf8),
+                      let rec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { return }
+                DispatchQueue.main.async { self?.record = rec }
+            }
+        case .draft(let wallpaper):
+            let q = shellQuote(wallpaper)
+            DispatchQueue.global().async { [weak self] in
+                var colors: [String] = []
+                var roles: [String: Any] = [:]
+                let (c1, o1) = shell("\(HOME)/.local/bin/omacosy-themecore palette magic \(q) --json 2>/dev/null")
+                if c1 == 0, let data = o1.data(using: .utf8),
+                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    colors = obj["colors"] as? [String] ?? []
+                }
+                // the role accent, never colors[4]: on the Phase 3 near-black
+                // wallpaper colors[4] gave blue where the bar shows white
+                let (c2, o2) = shell("\(HOME)/.local/bin/omacosy-themecore palette magic \(q) --roles --json 2>/dev/null")
+                if c2 == 0, let data = o2.data(using: .utf8),
+                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    roles = obj
+                }
+                DispatchQueue.main.async {
+                    self?.magicColors = colors
+                    self?.magicRoles = roles
+                }
+            }
+        }
+    }
+
+    private func close() {
+        guard ThemeEditor.current === self else { return }
+        ThemeEditor.current = nil
+        if let k = keyMonitor { NSEvent.removeMonitor(k); keyMonitor = nil }
+        if let dash = window.parent as? DashboardWindow {
+            dash.hideSuppressed = false
+            dash.removeChildWindow(window)
+            NSApp.activate(ignoringOtherApps: true)
+            dash.makeKeyAndOrderFront(nil)
+            if let root = dash.contentView { dash.makeFirstResponder(root) }
+        }
+        window.orderOut(nil)
     }
 }
 
@@ -2962,6 +3261,7 @@ final class RootView: NSView {
         palette = loadPalette()
         reloadLogo()
         for v in tabViews { (v as? RefreshableTab)?.refreshColors() }
+        ThemeEditor.refreshColors()
         needsDisplay = true
     }
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -3183,7 +3483,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // where the field editor swallows it before the responder chain.
             // A local monitor sees the event first, like the picker's does.
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
-                guard let self, self.window?.hideSuppressed != true else { return e }
+                guard let self else { return e }
+                // a live Theme Editor owns the session: Esc closes it and
+                // returns to Themes, never the dashboard under it
+                if e.keyCode == 53, e.window === self.window, ThemeEditor.closeIfOpen() { return nil }
+                guard self.window?.hideSuppressed != true else { return e }
                 // only Esc aimed at the dashboard: while the app picker is
                 // up it is the key window and handles its own Esc
                 if e.keyCode == 53, e.window === self.window { self.hide(); return nil }
@@ -3193,6 +3497,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func hide() {
+        // a live Theme Editor owns the session: outside clicks and the
+        // toggle key must not dismiss the dashboard until it is closed
+        guard window?.hideSuppressed != true else { return }
         AppPicker.dismiss()
         window?.hideSuppressed = false
         window?.orderOut(nil)

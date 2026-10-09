@@ -349,6 +349,11 @@ with seven tabs:
   `omacosy-settings`, and drops any app rule you removed (under OmniWM that
   also prunes the manager's own rule).
 - **Themes** — every theme as a card with its colours; click one to apply it.
+  Your own wallpapers appear below the stock themes as `Wallpaper #N`;
+  each saved variation gets a named card of its own, and its picture
+  carries a `· N variation(s)` badge. Hovering a card shows its pill —
+  **Edit** reopens a saved variation, **Customize** starts a new one from
+  a wallpaper in the Theme Editor.
 - **Wallpapers** — wallhaven.cc browsing; the tab is the shell until its
   Phase 7 lands.
 - **Storage** — the local wallpapers folder: where it is, a button that opens
@@ -697,6 +702,12 @@ omacosy-custom-theme status
 
 That is the whole setup. With an empty directory the cycle stays four themes
 and nothing is printed.
+
+The `Super+,` Settings card shows them as `Wallpaper #N` cards, one per
+picture: **Customize** on hover opens a new theme from one in the Theme
+Editor, and a saved variation carries a named card of its own with
+**Edit**. The editor's Palette Builder, previews and Wallpaper Editor are
+being built phase by phase.
 
 **How the colors are chosen.** The bar's own background keeps the
 measurement omacosy already makes to match the real macOS menu bar — a

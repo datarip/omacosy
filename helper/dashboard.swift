@@ -2537,11 +2537,2431 @@ final class EditorColumnView: NSView {
     }
 }
 
+// --- palette builder --------------------------------------------------------
+
+// The engine's binary. OMACOSY_THEMECORE_BIN is the test seam: a /tmp build
+// drives the editor without touching ~/.local/bin.
+func themecoreBin() -> String {
+    if let env = ProcessInfo.processInfo.environment["OMACOSY_THEMECORE_BIN"], !env.isEmpty {
+        return env
+    }
+    return HOME + "/.local/bin/omacosy-themecore"
+}
+
+func nsColor(fromHex hex: String) -> NSColor {
+    let clean = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+    guard clean.count == 6, let v = UInt64(clean, radix: 16) else { return .black }
+    return color(fromARGB: 0xff000000 | v)
+}
+
+func hexString(from color: NSColor) -> String? {
+    guard let c = color.usingColorSpace(.sRGB) else { return nil }
+    let r = max(0, min(255, Int((c.redComponent * 255).rounded())))
+    let g = max(0, min(255, Int((c.greenComponent * 255).rounded())))
+    let b = max(0, min(255, Int((c.blueComponent * 255).rounded())))
+    return String(format: "#%02x%02x%02x", r, g, b)
+}
+
+// A user-typed colour, normalised to "#rrggbb"; nil when it is not one.
+func cleanHex(_ raw: String) -> String? {
+    var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if !s.hasPrefix("#") { s = "#" + s }
+    guard s.count == 7, s.dropFirst().allSatisfy({ $0.isHexDigit }) else { return nil }
+    return s
+}
+
+// The tone curve's 256-entry LUT, for drawing the curve graph instantly.
+// This is a copy of themecore's ToneCurve.lut (Aether's buildCurveLUT); the
+// harness extracts this marked block and diffs it against the engine's
+// `curve lut` output, so the two cannot drift. Keep the markers intact.
+// MARK: tone-curve-lut-begin
+func dashboardToneCurveLUT(_ points: [[Double]]) -> [UInt8]? {
+    guard !points.isEmpty else { return nil }
+
+    var tagged: [(i: Int, x: Double, y: Double)] = [(0, 0, 0)]
+    for (i, p) in points.enumerated() where p.count == 2 {
+        tagged.append((i + 1, p[0], p[1]))
+    }
+    tagged.append((points.count + 1, 1, 1))
+    tagged.sort { $0.x == $1.x ? $0.i < $1.i : $0.x < $1.x }
+    let pts = tagged.map { (x: $0.x, y: $0.y) }
+    let n = pts.count
+
+    var m: [Double] = []
+    for i in 0..<(n - 1) {
+        let dx = pts[i + 1].x - pts[i].x
+        let dy = pts[i + 1].y - pts[i].y
+        m.append(dx == 0 ? 0 : dy / dx)
+    }
+
+    var tangents = [Double](repeating: 0, count: n)
+    tangents[0] = m[0]
+    tangents[n - 1] = m[n - 2]
+    for i in 1..<(n - 1) {
+        if m[i - 1] * m[i] <= 0 {
+            tangents[i] = 0
+        } else {
+            tangents[i] = (m[i - 1] + m[i]) / 2
+        }
+    }
+    for i in 0..<(n - 1) {
+        if m[i] == 0 {
+            tangents[i] = 0
+            tangents[i + 1] = 0
+        } else {
+            let a = tangents[i] / m[i]
+            let b = tangents[i + 1] / m[i]
+            let s = a * a + b * b
+            if s > 9 {
+                let t = 3 / s.squareRoot()
+                tangents[i] = t * a * m[i]
+                tangents[i + 1] = t * b * m[i]
+            }
+        }
+    }
+
+    var lut = [UInt8](repeating: 0, count: 256)
+    var seg = 0
+    for i in 0..<256 {
+        let x = Double(i) / 255
+        while seg < n - 2 && x > pts[seg + 1].x { seg += 1 }
+        let p0 = pts[seg], p1 = pts[seg + 1]
+        let h = p1.x - p0.x
+        if h == 0 {
+            lut[i] = UInt8(max(0, min(255, (p0.y * 255).rounded())))
+            continue
+        }
+        let t = (x - p0.x) / h
+        let t2 = t * t, t3 = t2 * t
+        let h00 = 2 * t3 - 3 * t2 + 1
+        let h10 = t3 - 2 * t2 + t
+        let h01 = -2 * t3 + 3 * t2
+        let h11 = t3 - t2
+        let val = h00 * p0.y + h10 * h * tangents[seg]
+            + h01 * p1.y + h11 * h * tangents[seg + 1]
+        lut[i] = UInt8(max(0, min(255, (val * 255).rounded())))
+    }
+    return lut
+}
+// MARK: tone-curve-lut-end
+
+// The 12 adjustments and their UI ranges, mirroring themecore's
+// Adjustments.limits (Aether's ADJUSTMENT_LIMITS). The editor keeps the
+// values so it can drive its controls; the engine applies them.
+struct EditorAdjustments {
+    var vibrance = 0.0
+    var saturation = 0.0
+    var contrast = 0.0
+    var brightness = 0.0
+    var shadows = 0.0
+    var highlights = 0.0
+    var hueShift = 0.0
+    var temperature = 0.0
+    var tint = 0.0
+    var blackPoint = 0.0
+    var whitePoint = 0.0
+    var gamma = 1.0
+
+    struct Field {
+        let key: String       // the record's spelling
+        let cli: String       // themecore's flag
+        let label: String
+        var min = 0.0, max = 0.0, step = 0.0, def = 0.0
+    }
+
+    static let fields: [Field] = [
+        Field(key: "vibrance", cli: "--vibrance", label: "Vibrance", min: -50, max: 50, step: 5, def: 0),
+        Field(key: "saturation", cli: "--saturation", label: "Saturation", min: -100, max: 100, step: 5, def: 0),
+        Field(key: "contrast", cli: "--contrast", label: "Contrast", min: -30, max: 30, step: 5, def: 0),
+        Field(key: "brightness", cli: "--brightness", label: "Brightness", min: -30, max: 30, step: 5, def: 0),
+        Field(key: "shadows", cli: "--shadows", label: "Shadows", min: -50, max: 50, step: 5, def: 0),
+        Field(key: "highlights", cli: "--highlights", label: "Highlights", min: -50, max: 50, step: 5, def: 0),
+        Field(key: "hueShift", cli: "--hue-shift", label: "Hue Shift", min: -180, max: 180, step: 10, def: 0),
+        Field(key: "temperature", cli: "--temperature", label: "Temperature", min: -50, max: 50, step: 5, def: 0),
+        Field(key: "tint", cli: "--tint", label: "Tint", min: -50, max: 50, step: 5, def: 0),
+        Field(key: "blackPoint", cli: "--black-point", label: "Black Point", min: -30, max: 30, step: 5, def: 0),
+        Field(key: "whitePoint", cli: "--white-point", label: "White Point", min: -30, max: 30, step: 5, def: 0),
+        Field(key: "gamma", cli: "--gamma", label: "Gamma", min: 0.5, max: 2.0, step: 0.1, def: 1.0),
+    ]
+
+    subscript(key: String) -> Double {
+        get {
+            switch key {
+            case "vibrance": return vibrance
+            case "saturation": return saturation
+            case "contrast": return contrast
+            case "brightness": return brightness
+            case "shadows": return shadows
+            case "highlights": return highlights
+            case "hueShift": return hueShift
+            case "temperature": return temperature
+            case "tint": return tint
+            case "blackPoint": return blackPoint
+            case "whitePoint": return whitePoint
+            case "gamma": return gamma
+            default: return 0
+            }
+        }
+        set {
+            switch key {
+            case "vibrance": vibrance = newValue
+            case "saturation": saturation = newValue
+            case "contrast": contrast = newValue
+            case "brightness": brightness = newValue
+            case "shadows": shadows = newValue
+            case "highlights": highlights = newValue
+            case "hueShift": hueShift = newValue
+            case "temperature": temperature = newValue
+            case "tint": tint = newValue
+            case "blackPoint": blackPoint = newValue
+            case "whitePoint": whitePoint = newValue
+            case "gamma": gamma = newValue
+            default: break
+            }
+        }
+    }
+
+    var isIdentity: Bool {
+        EditorAdjustments.fields.allSatisfy { abs(self[$0.key] - $0.def) < 1e-9 }
+    }
+
+    // The flags `palette render` takes.
+    var cliFlags: String {
+        EditorAdjustments.fields.map { f in
+            let v = self[f.key]
+            let text = f.step < 1 ? String(format: "%.1f", v) : String(format: "%.0f", v)
+            return "\(f.cli) \(text)"
+        }.joined(separator: " ")
+    }
+
+    static func format(_ v: Double, _ step: Double) -> String {
+        step < 1 ? String(format: "%.1f", v) : String(format: "%.0f", v)
+    }
+}
+
+// The editor's shared state. Both columns read it; its setters run the
+// engine calls. It mirrors Aether's theme store — a base palette, the four
+// extended colours, the 12 adjustments, the tone curve, locks and the
+// multi-selection — and owns every themecore invocation. Nothing here
+// touches the desktop.
+final class PaletteModel {
+    var onUpdate: (() -> Void)?
+    var onUserEdit: (() -> Void)?
+
+    private(set) var baseColors: [String] = []
+    private(set) var extendedHex: [String: String] = [:]
+    private(set) var adjustments = EditorAdjustments()
+    private(set) var curve: [[Double]] = []
+    private(set) var locked = Set<Int>()
+    private(set) var selected = Set<Int>()
+    private(set) var finalColors: [String] = []
+    private(set) var finalExtended: [String: String] = [:]
+    private(set) var method = "magic"
+    private(set) var mode = "auto"
+    private(set) var resolvedMode = "dark"
+    private(set) var strips: [String: [String]] = [:]
+    private(set) var histogram: [Int] = []
+    private(set) var shades: [String: String] = [:]
+    private(set) var recentColors: [String] = []
+    private(set) var imagePath = ""
+
+    enum EditTarget: Equatable {
+        case color(Int)
+        case extended(String)
+    }
+    private(set) var editTarget: EditTarget?
+
+    static let extendedKeys: [(key: String, label: String)] = [
+        ("accent", "Accent"),
+        ("cursor", "Cursor"),
+        ("selection_foreground", "Selection Text"),
+        ("selection_background", "Selection"),
+    ]
+    static let ansiLabels = ["BG", "RD", "GR", "YL", "BL", "MG", "CY", "FG",
+                             "DIM", "RD+", "GR+", "YL+", "BL+", "MG+", "CY+", "FG+"]
+
+    private(set) var modeGroups: [(label: String, modes: [(value: String, label: String)])] = []
+    private var paletteGeneration = 0
+    private var renderGeneration = 0
+    private var renderWork: DispatchWorkItem?
+    private var recentWork: DispatchWorkItem?
+    private var stripGeneration = 0
+
+    init() {
+        loadModes()
+    }
+
+    // --- seeding ------------------------------------------------------------
+
+    func seedDraft(image: String, colors: [String], accent: String?, resolved: String) {
+        imagePath = image
+        method = "magic"
+        mode = "auto"
+        resolvedMode = resolved == "light" ? "light" : "dark"
+        baseColors = colors
+        extendedHex = defaultExtended(colors, accent: accent)
+        adjustments = EditorAdjustments()
+        curve = []
+        locked.removeAll()
+        selected.removeAll()
+        editTarget = nil
+        finalColors = colors
+        finalExtended = extendedHex
+        strips.removeAll()
+        strips["magic"] = colors
+        histogram = []
+        update()
+        refreshRender()
+        loadHistogram()
+        loadStrips()
+    }
+
+    func seedEdition(record: [String: Any], image: String) {
+        imagePath = image
+        let pal = record["palette"] as? [String: Any] ?? [:]
+        baseColors = (pal["colors"] as? [String]) ?? []
+        extendedHex = defaultExtended(baseColors, accent: nil)
+        if let ext = pal["extended"] as? [String: Any] {
+            for slot in Self.extendedKeys {
+                if let v = ext[slot.key] as? String { extendedHex[slot.key] = v }
+            }
+        }
+        method = (pal["method"] as? String) ?? "magic"
+        mode = (pal["mode"] as? String) ?? "auto"
+        resolvedMode = (pal["resolvedMode"] as? String) ?? "dark"
+        adjustments = EditorAdjustments()
+        if let adj = pal["adjustments"] as? [String: Any] {
+            for f in EditorAdjustments.fields {
+                if let n = adj[f.key] as? NSNumber { adjustments[f.key] = n.doubleValue }
+            }
+        }
+        locked = Set((pal["locked"] as? [Int]) ?? [])
+        curve = parseCurve(pal["curve"])
+        selected.removeAll()
+        editTarget = nil
+        finalColors = baseColors
+        finalExtended = extendedHex
+        strips.removeAll()
+        histogram = []
+        update()
+        refreshRender()
+        loadHistogram()
+        loadStrips()
+    }
+
+    // --- user actions -------------------------------------------------------
+
+    func setBaseColor(_ index: Int, _ hex: String) {
+        guard baseColors.indices.contains(index), baseColors[index] != hex else { return }
+        baseColors[index] = hex
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func setExtended(_ key: String, _ hex: String) {
+        guard extendedHex[key] != hex else { return }
+        extendedHex[key] = hex
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func setAdjustment(_ key: String, _ value: Double) {
+        guard abs(adjustments[key] - value) > 1e-9 else { return }
+        adjustments[key] = value
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func resetAdjustments() {
+        guard !adjustments.isIdentity || !curve.isEmpty else { return }
+        adjustments = EditorAdjustments()
+        curve = []
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func setCurve(_ points: [[Double]]) {
+        guard points != curve else { return }
+        curve = points
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func resetCurve() {
+        guard !curve.isEmpty else { return }
+        curve = []
+        edited()
+        update()
+        refreshRender()
+    }
+
+    func chooseMethod(_ value: String) {
+        guard value != method else { return }
+        method = value
+        edited()
+        update()
+        regenerate(reset: value == "magic")
+    }
+
+    func setMode(_ index: Int) {
+        let names = ["auto", "dark", "light"]
+        let newMode = names[max(0, min(2, index))]
+        guard newMode != mode else { return }
+        mode = newMode
+        edited()
+        update()
+        if newMode == "auto" {
+            paletteGeneration += 1
+            let gen = paletteGeneration
+            let q = shellQuote(imagePath)
+            DispatchQueue.global().async { [weak self] in
+                guard let self else { return }
+                let (code, out) = self.themecore("palette suggest-mode \(q)")
+                let resolved = (code == 0
+                    && out.trimmingCharacters(in: .whitespacesAndNewlines) == "light") ? "light" : "dark"
+                DispatchQueue.main.async {
+                    guard self.paletteGeneration == gen else { return }
+                    self.resolvedMode = resolved
+                    self.update()
+                    if self.method != "magic" { self.regenerate(reset: false) }
+                    else { self.refreshRender() }
+                    self.loadStrips()
+                }
+            }
+        } else {
+            resolvedMode = newMode
+            if method != "magic" { regenerate(reset: false) } else { refreshRender() }
+            loadStrips()
+        }
+    }
+
+    func toggleLock(_ index: Int) {
+        let targets = selected.contains(index) ? selected : [index]
+        let lockAll = !locked.contains(index)
+        for t in targets {
+            if lockAll { locked.insert(t) } else { locked.remove(t) }
+        }
+        edited()
+        update()
+    }
+
+    func toggleSelect(_ index: Int) {
+        if selected.contains(index) { selected.remove(index) } else { selected.insert(index) }
+        update()
+    }
+
+    @discardableResult
+    func clearSelection() -> Bool {
+        guard !selected.isEmpty else { return false }
+        selected.removeAll()
+        update()
+        return true
+    }
+
+    @discardableResult
+    func clearEditTarget() -> Bool {
+        guard editTarget != nil else { return false }
+        editTarget = nil
+        update()
+        return true
+    }
+
+    func selectForEdit(_ target: EditTarget) {
+        if case .color(let i) = target, locked.contains(i) { return }
+        editTarget = target
+        update()
+    }
+
+    func editTargetHex() -> String? {
+        switch editTarget {
+        case .color(let i): return baseColors.indices.contains(i) ? baseColors[i] : nil
+        case .extended(let key): return extendedHex[key]
+        case nil: return nil
+        }
+    }
+
+    func editTargetTitle() -> String {
+        switch editTarget {
+        case .color(let i):
+            guard Self.ansiLabels.indices.contains(i) else { return "Colour \(i)" }
+            return "\(Self.ansiLabels[i]) (ANSI \(i))"
+        case .extended(let key):
+            return Self.extendedKeys.first { $0.key == key }?.label ?? key
+        case nil:
+            return "No colour selected"
+        }
+    }
+
+    func writeEditTarget(_ hex: String) {
+        switch editTarget {
+        case .color(let i): setBaseColor(i, hex)
+        case .extended(let key): setExtended(key, hex)
+        case nil: break
+        }
+        scheduleRecent(hex)
+    }
+
+    // Recently touched colours, debounced so a drag records only the value
+    // the user settles on.
+    private func scheduleRecent(_ hex: String) {
+        recentWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.recentColors.removeAll { $0 == hex }
+            self.recentColors.insert(hex, at: 0)
+            if self.recentColors.count > 6 { self.recentColors.removeLast(self.recentColors.count - 6) }
+            self.update()
+        }
+        recentWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    func methodLabel(_ value: String) -> String {
+        if value == "magic" { return "Magic" }
+        for group in modeGroups {
+            if let m = group.modes.first(where: { $0.value == value }) { return m.label }
+        }
+        return value
+    }
+
+    func teardown() {
+        renderWork?.cancel()
+        renderWork = nil
+        stripGeneration += 1
+        MethodPicker.dismiss()
+    }
+
+    // --- engine -------------------------------------------------------------
+
+    private func update() { onUpdate?() }
+    private func edited() { onUserEdit?() }
+
+    private func defaultExtended(_ colors: [String], accent: String?) -> [String: String] {
+        let c = colors.count == 16 ? colors : Array(repeating: "#000000", count: 16)
+        return ["accent": accent ?? c[4], "cursor": c[7],
+                "selection_foreground": c[0], "selection_background": c[7]]
+    }
+
+    private func parseCurve(_ raw: Any?) -> [[Double]] {
+        guard let list = raw as? [Any] else { return [] }
+        return list.compactMap { pair in
+            guard let p = pair as? [Any], p.count == 2,
+                  let x = (p[0] as? NSNumber)?.doubleValue,
+                  let y = (p[1] as? NSNumber)?.doubleValue else { return nil }
+            return [x, y]
+        }
+    }
+
+    private func loadModes() {
+        let (code, out) = themecore("modes --json")
+        guard code == 0, let data = out.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let groups = obj["groups"] as? [[String: Any]] else { return }
+        modeGroups = groups.map { g in
+            let modes = (g["modes"] as? [[String: Any]] ?? []).compactMap {
+                m -> (value: String, label: String)? in
+                guard let v = m["value"] as? String else { return nil }
+                return (v, (m["label"] as? String) ?? v)
+            }
+            return ((g["label"] as? String) ?? "", modes)
+        }
+    }
+
+    @discardableResult
+    private func themecore(_ args: String) -> (Int32, String) {
+        shell("\(shellQuote(themecoreBin())) \(args) 2>/dev/null")
+    }
+
+    // Re-derives the base palette from the image. Locked colours keep their
+    // old value; choosing Magic resets the adjustments too (the plan's
+    // reset action).
+    private func regenerate(reset: Bool) {
+        guard !imagePath.isEmpty, baseColors.count == 16 else { return }
+        paletteGeneration += 1
+        let gen = paletteGeneration
+        let q = shellQuote(imagePath)
+        let m = method
+        let light = resolvedMode == "light"
+        let lockedNow = locked
+        let previous = baseColors
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let cmd = m == "magic"
+                ? "palette magic \(q) --json"
+                : "palette extract \(q) --mode \(m)\(light ? " --light" : "") --json"
+            let (code, out) = self.themecore(cmd)
+            var colors: [String] = []
+            if code == 0, let data = out.data(using: .utf8),
+               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                colors = obj["colors"] as? [String] ?? []
+            }
+            guard colors.count == 16 else { return }
+            DispatchQueue.main.async {
+                guard self.paletteGeneration == gen else { return }
+                var next = colors
+                for i in lockedNow where i < 16 { next[i] = previous[i] }
+                self.baseColors = next
+                if reset { self.adjustments = EditorAdjustments() }
+                self.update()
+                self.refreshRender()
+            }
+        }
+    }
+
+    // One render per 75 ms while the user drags: the first change schedules
+    // the call, later changes ride along instead of restarting it.
+    private func refreshRender() {
+        guard baseColors.count == 16 else { return }
+        guard renderWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.renderWork = nil
+            self?.performRender()
+        }
+        renderWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.075, execute: work)
+    }
+
+    private func performRender() {
+        guard baseColors.count == 16 else { return }
+        renderGeneration += 1
+        let gen = renderGeneration
+        var args = "palette render --colors \(shellQuote(baseColors.joined(separator: ",")))"
+        for slot in Self.extendedKeys {
+            let flag = slot.key.replacingOccurrences(of: "_", with: "-")
+            args += " --\(flag) \(shellQuote(extendedHex[slot.key] ?? "#000000"))"
+        }
+        args += " \(adjustments.cliFlags)"
+        if !curve.isEmpty {
+            let text = curve.map { "\($0[0]),\($0[1])" }.joined(separator: ";")
+            args += " --curve \(shellQuote(text))"
+        }
+        args += " --json"
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.themecore(args)
+            guard code == 0, let data = out.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let colors = obj["colors"] as? [String], colors.count == 16 else { return }
+            let ext = obj["extended"] as? [String: String] ?? [:]
+            DispatchQueue.main.async {
+                guard self.renderGeneration == gen else { return }
+                self.finalColors = colors
+                if !ext.isEmpty { self.finalExtended = ext }
+                self.update()
+                self.loadShades(colors)
+            }
+        }
+    }
+
+    // Aether's derived shade ramps, for the semantic colour groups. Follows
+    // the rendered palette, so the shades move with the adjustments.
+    private func loadShades(_ colors: [String]) {
+        let csv = colors.joined(separator: ",")
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.themecore("palette shades --colors \(shellQuote(csv)) --json")
+            guard code == 0, let data = out.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+            else { return }
+            DispatchQueue.main.async {
+                self.shades = obj
+                self.update()
+            }
+        }
+    }
+
+    private func loadHistogram() {
+        guard !imagePath.isEmpty else { return }
+        let q = shellQuote(imagePath)
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.themecore("image histogram \(q) --json")
+            guard code == 0, let data = out.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let bins = obj["bins"] as? [Int], bins.count == 256 else { return }
+            DispatchQueue.main.async {
+                self.histogram = bins
+                self.update()
+            }
+        }
+    }
+
+    // The mini palette strips the Method picker shows. The Magic strip is
+    // the seed itself and appears at once; the 24 mode strips run in small
+    // parallel batches shortly after the first paint, so the picker is
+    // populated by the time it is opened.
+    private func loadStrips() {
+        guard !imagePath.isEmpty else { return }
+        stripGeneration += 1
+        let gen = stripGeneration
+        let values = modeGroups.flatMap { $0.modes.map { $0.value } }
+        let q = shellQuote(imagePath)
+        let light = resolvedMode == "light"
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            let batchSize = 6
+            var start = 0
+            while start < values.count {
+                guard self.stripGeneration == gen else { return }
+                let batch = Array(values[start..<min(start + batchSize, values.count)])
+                let group = DispatchGroup()
+                let lock = NSLock()
+                var done: [(String, [String])] = []
+                for value in batch {
+                    group.enter()
+                    DispatchQueue.global().async {
+                        defer { group.leave() }
+                        let cmd = "palette extract \(q) --mode \(value)\(light ? " --light" : "") --json"
+                        let (code, out) = self.themecore(cmd)
+                        guard code == 0, let data = out.data(using: .utf8),
+                              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                              let colors = obj["colors"] as? [String], colors.count == 16
+                        else { return }
+                        lock.lock()
+                        done.append((value, colors))
+                        lock.unlock()
+                    }
+                }
+                group.wait()
+                guard self.stripGeneration == gen else { return }
+                DispatchQueue.main.async {
+                    guard self.stripGeneration == gen else { return }
+                    for (value, colors) in done { self.strips[value] = colors }
+                    if !done.isEmpty { self.update() }
+                }
+                start += batchSize
+            }
+        }
+    }
+}
+
+// A flat "popup button": the current choice and a chevron; the menu itself
+// is the MethodPicker card window.
+final class PopupButtonView: NSView {
+    var title = "" { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        palette.itemBG.withAlphaComponent(0.35).setFill()
+        r.fill()
+        palette.muted.withAlphaComponent(0.35).setStroke()
+        r.lineWidth = 1
+        r.stroke()
+        drawMidLeft(truncate(title, nerdFont("Regular", 12), bounds.width - 40),
+                    nerdFont("Regular", 12), palette.label,
+                    x: 10, midTop: bounds.height / 2, height: bounds.height)
+        drawMidCenter("\u{f078}", nerdFont("Regular", 9), palette.muted,
+                      centerX: bounds.width - 15, midTop: bounds.height / 2, height: bounds.height)
+    }
+
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- method picker ----------------------------------------------------------
+
+// The dark Method dropdown, in the same visual language as the Workspaces
+// "Add App" picker: a borderless card child window with a scrollable list,
+// Esc/outside-click to close, and a compact 16-square strip on each mode row
+// showing that mode's palette for the current image.
+final class MethodPicker: NSObject {
+    private static var active: MethodPicker?
+
+    struct Row {
+        let header: String?   // a group label row when set
+        let value: String?    // a selectable mode when set
+        let label: String
+    }
+
+    private let window: PickerWindow
+    private let root = MethodPickerRoot()
+    private var rows: [Row]
+    private var selected = 0
+    private var completion: ((String) -> Void)?
+    private var monitors: [Any] = []
+    private let W: CGFloat = 340
+    private let H: CGFloat = 430
+
+    private init(rows: [Row], strips: [String: [String]], currentMethod: String,
+                 completion: @escaping (String) -> Void) {
+        self.rows = rows
+        self.completion = completion
+        window = PickerWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        super.init()
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .popUpMenu
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.contentView = root
+        root.rows = rows
+        root.strips = strips
+        root.onPick = { [weak self] value in self?.pick(value) }
+        selected = rows.firstIndex { $0.value == currentMethod }
+            ?? rows.firstIndex { $0.value != nil } ?? 0
+        root.selected = selected
+    }
+
+    static func present(from view: NSView, rows: [Row], strips: [String: [String]],
+                        currentMethod: String, completion: @escaping (String) -> Void) {
+        active?.close()
+        let p = MethodPicker(rows: rows, strips: strips, currentMethod: currentMethod,
+                             completion: completion)
+        guard let host = view.window else { return }
+        let btn = host.convertToScreen(view.convert(view.bounds, to: nil))
+        var x = btn.minX
+        var y = btn.minY - p.H - 6
+        if y < 40 { y = btn.maxY + 6 }
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(btn.origin) }) ?? NSScreen.main {
+            x = min(max(screen.frame.minX + 8, x), screen.frame.maxX - p.W - 8)
+        }
+        p.window.setFrame(NSRect(x: x, y: y, width: p.W, height: p.H), display: true)
+        active = p
+        // a child window: it stays above the modal and is ordered out with it
+        host.addChildWindow(p.window, ordered: .above)
+        p.show()
+    }
+
+    static func dismiss() { active?.close() }
+
+    private func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        root.needsLayout = true
+        root.layoutSubtreeIfNeeded()
+        root.relayout()
+        root.scrollToSelected()
+        let km = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
+            guard let self else { return e }
+            if e.keyCode == 53 { self.close(); return nil }
+            if e.window === self.window {
+                if e.keyCode == 126 { self.move(-1); return nil }  // up
+                if e.keyCode == 125 { self.move(1); return nil }   // down
+                if e.keyCode == 36 || e.keyCode == 76 { self.pickSelected(); return nil }
+            }
+            return e
+        }
+        let lm = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
+            if e.window !== self?.window { self?.close() }
+            return e
+        }
+        let gm = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.close()
+        }
+        monitors = [km, lm, gm].compactMap { $0 }
+    }
+
+    private func move(_ delta: Int) {
+        var i = selected
+        repeat { i += delta } while rows.indices.contains(i) && rows[i].value == nil
+        guard rows.indices.contains(i), rows[i].value != nil else { return }
+        selected = i
+        root.selected = i
+        root.needsDisplay = true
+        root.scrollToSelected()
+    }
+
+    private func pickSelected() {
+        guard rows.indices.contains(selected), let v = rows[selected].value else { return }
+        pick(v)
+    }
+
+    private func pick(_ value: String) {
+        completion?(value)
+        close()
+    }
+
+    private func close() {
+        for m in monitors { NSEvent.removeMonitor(m) }
+        monitors.removeAll()
+        window.parent?.removeChildWindow(window)
+        window.orderOut(nil)
+        if MethodPicker.active === self { MethodPicker.active = nil }
+    }
+}
+
+final class MethodPickerRoot: NSView {
+    let scroll = NSScrollView()
+    let list = MethodPickerList()
+    var rows: [MethodPicker.Row] = []
+    var strips: [String: [String]] = [:]
+    var selected = 0
+    var onPick: ((String) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(scroll)
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = list
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10)
+        palette.barBG.setFill()
+        r.fill()
+        palette.accent.setStroke()
+        r.lineWidth = 1
+        r.stroke()
+        drawTopLeft("Method", nerdFont("Bold", 12), palette.accent,
+                    x: 12, top: 9, height: bounds.height)
+    }
+
+    override func layout() {
+        super.layout()
+        relayout()
+    }
+
+    func relayout() {
+        let pad: CGFloat = 10
+        let headerH: CGFloat = 32
+        scroll.frame = NSRect(x: pad, y: pad, width: max(0, bounds.width - pad * 2),
+                              height: max(0, bounds.height - pad * 2 - headerH))
+        list.rows = rows
+        list.strips = strips
+        list.selected = selected
+        list.onPick = onPick
+        let w = max(scroll.contentSize.width, 10)
+        list.frame = NSRect(x: 0, y: 0, width: w,
+                            height: max(scroll.contentSize.height, MethodPickerList.height(for: rows)))
+    }
+
+    func scrollToSelected() { list.scrollRowIntoView(selected, in: scroll) }
+}
+
+final class MethodPickerList: NSView {
+    var rows: [MethodPicker.Row] = [] { didSet { needsDisplay = true } }
+    var strips: [String: [String]] = [:] { didSet { needsDisplay = true } }
+    var selected = 0 { didSet { needsDisplay = true } }
+    var onPick: ((String) -> Void)?
+    private static let rowH: CGFloat = 30
+    private static let headerH: CGFloat = 26
+
+    static func height(for rows: [MethodPicker.Row]) -> CGFloat {
+        rows.reduce(0) { $0 + ($1.value == nil ? headerH : rowH) }
+    }
+
+    private func rowTops() -> [CGFloat] {
+        var tops: [CGFloat] = []
+        var y: CGFloat = 0
+        for row in rows {
+            tops.append(y)
+            y += row.value == nil ? Self.headerH : Self.rowH
+        }
+        return tops
+    }
+
+    private func rowRect(_ i: Int, tops: [CGFloat]) -> NSRect {
+        let h = rows[i].value == nil ? Self.headerH : Self.rowH
+        return NSRect(x: 0, y: bounds.height - tops[i] - h, width: bounds.width, height: h)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let tops = rowTops()
+        for (i, row) in rows.enumerated() {
+            let r = rowRect(i, tops: tops)
+            if row.value == nil {
+                drawMidLeft(row.header ?? "", nerdFont("Bold", 10), palette.muted,
+                            x: 10, midTop: tops[i] + Self.headerH / 2, height: bounds.height)
+                continue
+            }
+            if i == selected {
+                palette.accent.withAlphaComponent(0.85).setFill()
+                r.fill()
+            }
+            let ink = i == selected ? palette.barBG : palette.label
+            drawMidLeft(truncate(row.label, nerdFont("Regular", 12), bounds.width - 170),
+                        nerdFont("Regular", 12), ink,
+                        x: 10, midTop: tops[i] + Self.rowH / 2, height: bounds.height)
+            if let strip = strips[row.value ?? ""] {
+                drawStrip(strip, in: r, selected: i == selected)
+            } else {
+                drawStripPlaceholder(in: r, selected: i == selected)
+            }
+            if i == selected {
+                drawMidLeft("\u{f00c}", nerdFont("Regular", 10), palette.barBG,
+                            x: bounds.width - 16, midTop: tops[i] + Self.rowH / 2, height: bounds.height)
+            }
+        }
+    }
+
+    // 16 tiny bars, the mode's palette left to right; slim, line-like.
+    private func drawStrip(_ colors: [String], in row: NSRect, selected: Bool) {
+        let sqW: CGFloat = 7, sqH: CGFloat = 5, gap: CGFloat = 1
+        let total = CGFloat(colors.count) * sqW + CGFloat(max(0, colors.count - 1)) * gap
+        var x = row.maxX - 30 - total
+        let y = row.midY - sqH / 2
+        for hex in colors {
+            let cell = NSRect(x: x, y: y, width: sqW, height: sqH)
+            let path = NSBezierPath(roundedRect: cell, xRadius: 1, yRadius: 1)
+            nsColor(fromHex: hex).setFill()
+            path.fill()
+            palette.barBG.withAlphaComponent(selected ? 0.25 : 0.4).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+            x += sqW + gap
+        }
+    }
+
+    private func drawStripPlaceholder(in row: NSRect, selected: Bool) {
+        let sqW: CGFloat = 7, sqH: CGFloat = 5, gap: CGFloat = 1
+        var x = row.maxX - 30 - (16 * sqW + 15 * gap)
+        let y = row.midY - sqH / 2
+        for _ in 0..<16 {
+            palette.muted.withAlphaComponent(selected ? 0.35 : 0.18).setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: y, width: sqW, height: sqH),
+                         xRadius: 1, yRadius: 1).fill()
+            x += sqW + gap
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let tops = rowTops()
+        for i in rows.indices where rowRect(i, tops: tops).contains(p) {
+            guard let value = rows[i].value else { return }
+            selected = i
+            needsDisplay = true
+            onPick?(value)
+            return
+        }
+    }
+
+    func scrollRowIntoView(_ index: Int, in scroll: NSScrollView) {
+        guard rows.indices.contains(index) else { return }
+        let tops = rowTops()
+        let r = rowRect(index, tops: tops)
+        let clip = scroll.contentView.bounds
+        var origin = clip.origin
+        if r.minY < clip.minY { origin.y = r.minY }
+        else if r.maxY > clip.maxY { origin.y = r.maxY - clip.height }
+        let maxY = max(0, bounds.height - scroll.contentSize.height)
+        origin.y = max(0, min(maxY, origin.y))
+        scroll.contentView.scroll(to: origin)
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- compact slider ---------------------------------------------------------
+
+// One adjustment, Aether-style: label on the left, a thin track with a small
+// square thumb in the middle, the value on the right. Drag sets the value
+// (snapped to the range's step), double-click resets it, and the value can be
+// typed.
+final class AdjustmentSliderView: NSView, NSTextFieldDelegate {
+    let field: EditorAdjustments.Field
+    var value: Double = 0 { didSet { needsDisplay = true } }
+    var onChange: ((Double) -> Void)?
+    private let valueField = NSTextField()
+    private var dragging = false
+
+    static let rowHeight: CGFloat = 26
+
+    init(field: EditorAdjustments.Field) {
+        self.field = field
+        super.init(frame: .zero)
+        value = field.def
+        valueField.isBezeled = false
+        valueField.drawsBackground = false
+        valueField.textColor = palette.label
+        valueField.font = nerdFont("Regular", 11)
+        valueField.alignment = .right
+        valueField.focusRingType = .none
+        valueField.delegate = self
+        valueField.target = self
+        valueField.action = #selector(fieldReturn)
+        addSubview(valueField)
+        syncField()
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func setValue(_ v: Double, notify: Bool) {
+        value = v
+        syncField()
+        if notify { onChange?(v) }
+    }
+
+    func refreshColors() {
+        valueField.textColor = palette.label
+        needsDisplay = true
+    }
+
+    private func syncField() {
+        guard valueField.currentEditor() == nil else { return }
+        valueField.stringValue = EditorAdjustments.format(value, field.step)
+    }
+
+    private func snap(_ v: Double) -> Double {
+        let steps = ((v - field.min) / field.step).rounded()
+        return min(field.max, max(field.min, field.min + steps * field.step))
+    }
+
+    @objc private func fieldReturn() { commitField() }
+
+    private func commitField() {
+        guard let raw = Double(valueField.stringValue) else { syncField(); return }
+        let v = snap(raw)
+        if abs(v - value) > 1e-9 { setValue(v, notify: true) }
+        syncField()
+        needsDisplay = true
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) { commitField() }
+
+    private var labelW: CGFloat { 88 }
+    private var valueW: CGFloat { 34 }
+    private var track: (CGFloat, CGFloat) { (labelW, max(labelW + 24, bounds.width - valueW - 4)) }
+
+    override func layout() {
+        super.layout()
+        valueField.frame = NSRect(x: bounds.width - valueW,
+                                  y: bounds.height / 2 - 8, width: valueW, height: 16)
+    }
+
+    private func updateValue(from p: NSPoint) {
+        let (x0, x1) = track
+        let t = min(1, max(0, (p.x - x0) / max(1, x1 - x0)))
+        setValue(snap(field.min + Double(t) * (field.max - field.min)), notify: true)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard p.x >= labelW - 4, p.x <= bounds.width, p.y >= 4, p.y <= bounds.height - 4 else { return }
+        if event.clickCount == 2 {
+            setValue(field.def, notify: true)
+            return
+        }
+        dragging = true
+        updateValue(from: p)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard dragging else { return }
+        updateValue(from: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) { dragging = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let mid = bounds.height / 2
+        drawMidLeft(field.label, nerdFont("Regular", 11), palette.label,
+                    x: 0, midTop: mid, height: bounds.height)
+        let (x0, x1) = track
+        palette.muted.withAlphaComponent(0.35).setFill()
+        NSRect(x: x0, y: mid - 1, width: x1 - x0, height: 2).fill()
+        let t = (value - field.min) / max(1e-9, field.max - field.min)
+        let cx = x0 + CGFloat(t) * (x1 - x0)
+        let atDefault = abs(value - field.def) < 1e-9
+        let thumb = NSBezierPath(roundedRect: NSRect(x: cx - 4.5, y: mid - 4.5, width: 9, height: 9),
+                                 xRadius: 2, yRadius: 2)
+        (atDefault ? palette.muted : palette.accent).setFill()
+        thumb.fill()
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- tone curve editor ------------------------------------------------------
+
+// The curve box, Aether-style: the image's luminance histogram as a backdrop,
+// the curve sampled from the LUT, and draggable control points. The endpoints
+// (0,0) and (1,1) are fixed; click empty space to add, drag to move,
+// double-click a point to remove, Reset returns to identity.
+final class CurveEditorView: NSView {
+    var points: [[Double]] = [] { didSet { needsDisplay = true } }
+    var histogram: [Int] = [] { didSet { needsDisplay = true } }
+    var onChange: (([[Double]]) -> Void)?
+
+    static let viewHeight: CGFloat = 116
+    private var dragIndex: Int?
+    private let inset: CGFloat = 10
+    private let topPad: CGFloat = 12
+
+    private var graph: NSRect {
+        NSRect(x: inset, y: inset, width: max(1, bounds.width - inset * 2),
+               height: max(1, bounds.height - topPad - inset))
+    }
+
+    private func pointXY(_ p: NSPoint) -> (Double, Double) {
+        let g = graph
+        let x = Double((p.x - g.minX) / max(1, g.width))
+        let y = Double((p.y - g.minY) / max(1, g.height))
+        return (min(1, max(0, x)), min(1, max(0, y)))
+    }
+
+    private func screenXY(_ x: Double, _ y: Double) -> NSPoint {
+        let g = graph
+        return NSPoint(x: g.minX + CGFloat(x) * g.width, y: g.minY + CGFloat(y) * g.height)
+    }
+
+    private func hitIndex(_ p: NSPoint) -> Int? {
+        for (i, pt) in points.enumerated() {
+            let s = screenXY(pt[0], pt[1])
+            if hypot(s.x - p.x, s.y - p.y) <= 9 { return i }
+        }
+        return nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        palette.itemBG.withAlphaComponent(0.35).setFill()
+        box.fill()
+        palette.muted.withAlphaComponent(0.35).setStroke()
+        box.lineWidth = 1
+        box.stroke()
+
+        let g = graph
+        palette.muted.withAlphaComponent(0.12).setStroke()
+        for i in 1..<4 {
+            let x = g.minX + g.width * CGFloat(i) / 4
+            let y = g.minY + g.height * CGFloat(i) / 4
+            NSBezierPath.strokeLine(from: NSPoint(x: x, y: g.minY), to: NSPoint(x: x, y: g.maxY))
+            NSBezierPath.strokeLine(from: NSPoint(x: g.minX, y: y), to: NSPoint(x: g.maxX, y: y))
+        }
+
+        if histogram.count == 256, let maxBins = histogram.max(), maxBins > 0 {
+            let barW = g.width / 256
+            palette.muted.withAlphaComponent(0.20).setFill()
+            for (i, n) in histogram.enumerated() {
+                let h = CGFloat(Double(n) / Double(maxBins)) * g.height
+                NSRect(x: g.minX + CGFloat(i) * barW, y: g.minY, width: max(0.5, barW), height: h).fill()
+            }
+        }
+
+        let lut = dashboardToneCurveLUT(points) ?? (0...255).map { UInt8($0) }
+        let path = NSBezierPath()
+        for i in 0..<256 {
+            let p = screenXY(Double(i) / 255, Double(lut[i]) / 255)
+            if i == 0 { path.move(to: p) } else { path.line(to: p) }
+        }
+        palette.accent.setStroke()
+        path.lineWidth = 2
+        path.stroke()
+
+        // fixed endpoints, faint; interior points solid
+        for (x, y) in [(0.0, 0.0), (1.0, 1.0)] {
+            let s = screenXY(x, y)
+            palette.label.withAlphaComponent(0.45).setFill()
+            NSBezierPath(ovalIn: NSRect(x: s.x - 2, y: s.y - 2, width: 4, height: 4)).fill()
+        }
+        for pt in points {
+            let s = screenXY(pt[0], pt[1])
+            let dot = NSBezierPath(ovalIn: NSRect(x: s.x - 4, y: s.y - 4, width: 8, height: 8))
+            palette.accent.setFill()
+            dot.fill()
+            palette.barBG.setStroke()
+            dot.lineWidth = 1.5
+            dot.stroke()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard graph.contains(p) else { return }
+        if let i = hitIndex(p) {
+            if event.clickCount == 2 {
+                var next = points
+                next.remove(at: i)
+                onChange?(next)
+                dragIndex = nil
+            } else {
+                dragIndex = i
+            }
+            return
+        }
+        let (x, y) = pointXY(p)
+        let clampedX = min(0.99, max(0.01, x))
+        var next = points
+        let newIndex = next.firstIndex { $0[0] > clampedX } ?? next.count
+        next.insert([clampedX, y], at: newIndex)
+        dragIndex = newIndex
+        onChange?(next)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let i = dragIndex, points.indices.contains(i) else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        let (rawX, y) = pointXY(p)
+        let lower = i > 0 ? points[i - 1][0] + 0.005 : 0.005
+        let upper = i < points.count - 1 ? points[i + 1][0] - 0.005 : 0.995
+        guard lower < upper else { return }
+        var next = points
+        next[i] = [min(upper, max(lower, rawX)), y]
+        onChange?(next)
+    }
+
+    override func mouseUp(with event: NSEvent) { dragIndex = nil }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- palette cards ----------------------------------------------------------
+
+// Aether's palette cards: role label and a contrast badge on top, the hex at
+// the bottom, the colour filling the card. Used for the 16 ANSI colours and
+// for the four extended colours.
+final class PaletteCardsView: NSView {
+    struct Card {
+        let label: String
+        let hex: String
+        let index: Int          // 0...15 for an ANSI slot, -1 for extended
+        let extendedKey: String?
+    }
+
+    var cards: [Card] = [] { didSet { needsDisplay = true } }
+    var locked = Set<Int>() { didSet { needsDisplay = true } }
+    var selected = Set<Int>() { didSet { needsDisplay = true } }
+    var editTarget: PaletteModel.EditTarget? { didSet { needsDisplay = true } }
+    var bgHex = "#000000"
+    var showsLocks = true
+    var onEdit: ((PaletteModel.EditTarget) -> Void)?
+    var onToggleLock: ((Int) -> Void)?
+    var onToggleSelect: ((Int) -> Void)?
+    var onHover: (() -> Void)?
+
+    static let columns = 8
+    static let cardH: CGFloat = 50
+    static let cardGap: CGFloat = 5
+
+    static func height(for count: Int) -> CGFloat {
+        let rows = max(1, (count + columns - 1) / columns)
+        return CGFloat(rows) * cardH + CGFloat(rows - 1) * cardGap
+    }
+
+    private func rects() -> [NSRect] {
+        guard bounds.width > 0 else { return [] }
+        let w = ((bounds.width - CGFloat(Self.columns - 1) * Self.cardGap) / CGFloat(Self.columns))
+        var out: [NSRect] = []
+        let rowCount = (cards.count + Self.columns - 1) / Self.columns
+        for row in 0..<max(1, rowCount) {
+            for col in 0..<Self.columns {
+                let i = row * Self.columns + col
+                if i >= cards.count { break }
+                let x = CGFloat(col) * (w + Self.cardGap)
+                let top = CGFloat(row) * (Self.cardH + Self.cardGap)
+                out.append(NSRect(x: x, y: bounds.height - top - Self.cardH, width: w, height: Self.cardH))
+            }
+        }
+        return out
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (i, card) in cards.enumerated() {
+            let all = rects()
+            guard all.indices.contains(i) else { break }
+            let r = all[i]
+            let path = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+            nsColor(fromHex: card.hex).setFill()
+            path.fill()
+
+            let light = relativeLuminance(nsColor(fromHex: card.hex)) > 0.5
+            let ink: NSColor = light ? .black : .white
+            let inkMain = ink.withAlphaComponent(light ? 0.78 : 0.92)
+            let inkFaint = ink.withAlphaComponent(light ? 0.55 : 0.68)
+
+            drawMidLeft(card.label, nerdFont("Bold", 9), inkMain,
+                        x: r.minX + 6, midTop: bounds.height - r.maxY + 10, height: bounds.height)
+            drawMidLeft(card.hex, nerdFont("Regular", 8), inkFaint,
+                        x: r.minX + 6, midTop: bounds.height - r.maxY + Self.cardH - 10,
+                        height: bounds.height)
+
+            if showsLocks, card.index >= 0 {
+                let lockedNow = locked.contains(card.index)
+                drawMidCenter("\u{f023}", nerdFont("Regular", 8),
+                              lockedNow ? inkMain : ink.withAlphaComponent(0.22),
+                              centerX: r.maxX - 11, midTop: bounds.height - r.maxY + 10,
+                              height: bounds.height)
+            }
+
+            // contrast badge against the palette background, bottom-right
+            // (the BG card compares with itself, so it carries none)
+            if card.index > 0, r.width >= 60 {
+                let ratio = contrastRatioHex(card.hex, bgHex)
+                let level = ratio >= 7 ? "AAA" : (ratio >= 4.5 ? "AA" : (ratio >= 3 ? "AA-L" : "!"))
+                drawMidCenter(level, nerdFont("Bold", 8), level == "!" ? ink : inkFaint,
+                              centerX: r.maxX - 16, midTop: bounds.height - r.maxY + Self.cardH - 10,
+                              height: bounds.height)
+            }
+
+            let isEditing: Bool
+            switch editTarget {
+            case .color(let idx): isEditing = card.index >= 0 && idx == card.index
+            case .extended(let key): isEditing = card.extendedKey == key
+            case nil: isEditing = false
+            }
+            if isEditing {
+                palette.accent.setStroke()
+                path.lineWidth = 2.5
+                path.stroke()
+            } else if card.index >= 0 && selected.contains(card.index) {
+                palette.accent.withAlphaComponent(0.9).setStroke()
+                path.lineWidth = 1.5
+                path.stroke()
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let all = rects()
+        for (i, card) in cards.enumerated() {
+            guard all.indices.contains(i), all[i].contains(p) else { continue }
+            let r = all[i]
+            let lockZone = NSRect(x: r.maxX - 22, y: r.maxY - 18, width: 20, height: 18)
+            if showsLocks, card.index >= 0, lockZone.contains(p) {
+                onToggleLock?(card.index)
+            } else if card.index >= 0, event.modifierFlags.contains(.shift) {
+                onToggleSelect?(card.index)
+            } else if let key = card.extendedKey {
+                onEdit?(.extended(key))
+            } else {
+                onEdit?(.color(card.index))
+            }
+            return
+        }
+    }
+
+    func flashHover() { onHover?() }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// WCAG contrast between two hex colours, for the card badges.
+func contrastRatioHex(_ a: String, _ b: String) -> Double {
+    let la = Double(relativeLuminance(nsColor(fromHex: a)))
+    let lb = Double(relativeLuminance(nsColor(fromHex: b)))
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+}
+
+// --- semantic colours -------------------------------------------------------
+
+// Aether's semantic groups: the Background and Foreground shade ramps and the
+// accent pair, all derived from the palette, plus the UI group — the four
+// extended colours, which are editable.
+final class SemanticSectionView: NSView {
+    struct Card {
+        let label: String
+        let hex: String
+        let key: String?   // non-nil: an editable extended colour
+    }
+    struct Group {
+        let title: String
+        let cards: [Card]
+    }
+
+    var groups: [Group] = [] { didSet { needsDisplay = true } }
+    var editTarget: PaletteModel.EditTarget? { didSet { needsDisplay = true } }
+    var onEdit: ((PaletteModel.EditTarget) -> Void)?
+
+    static let groupH: CGFloat = 86
+    static let rowGap: CGFloat = 8
+
+    static func height() -> CGFloat { groupH * 2 + rowGap }
+
+    private func boxes() -> [(group: Group, box: NSRect, cards: [NSRect])] {
+        guard groups.count == 4, bounds.width > 0 else { return [] }
+        let colGap: CGFloat = 8
+        let colW = (bounds.width - colGap) / 2
+        var out: [(Group, NSRect, [NSRect])] = []
+        for (i, group) in groups.enumerated() {
+            let col = i % 2, row = i / 2
+            let x = CGFloat(col) * (colW + colGap)
+            let top = CGFloat(row) * (Self.groupH + Self.rowGap)
+            let box = NSRect(x: x, y: bounds.height - top - Self.groupH,
+                             width: colW, height: Self.groupH)
+            let padX: CGFloat = 10
+            let n = max(1, group.cards.count)
+            let gap: CGFloat = 5
+            let cardW = (box.width - padX * 2 - CGFloat(n - 1) * gap) / CGFloat(n)
+            var rects: [NSRect] = []
+            for j in 0..<group.cards.count {
+                let cx = box.minX + padX + CGFloat(j) * (cardW + gap)
+                rects.append(NSRect(x: cx, y: box.minY + 22, width: cardW, height: 34))
+            }
+            out.append((group, box, rects))
+        }
+        return out
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (group, box, rects) in boxes() {
+            let boxPath = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+            palette.itemBG.withAlphaComponent(0.22).setFill()
+            boxPath.fill()
+            palette.muted.withAlphaComponent(0.15).setStroke()
+            boxPath.lineWidth = 1
+            boxPath.stroke()
+            drawTopLeft(group.title.uppercased(), nerdFont("Bold", 9), palette.muted,
+                        x: box.minX + 10, top: bounds.height - box.maxY + 8, height: bounds.height)
+            for (j, card) in group.cards.enumerated() {
+                let r = rects[j]
+                let path = NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)
+                nsColor(fromHex: card.hex).setFill()
+                path.fill()
+                let light = relativeLuminance(nsColor(fromHex: card.hex)) > 0.5
+                let main: NSColor = light ? .black : .white
+                drawMidLeft(card.hex, nerdFont("Regular", 8), main.withAlphaComponent(0.62),
+                            x: r.minX + 5, midTop: bounds.height - r.maxY + r.height - 9,
+                            height: bounds.height)
+                drawMidCenter(card.label, nerdFont("Regular", 9), palette.label.withAlphaComponent(0.72),
+                              centerX: r.midX, midTop: bounds.height - r.minY + 7,
+                              height: bounds.height)
+                if let key = card.key {
+                    var isEditing = false
+                    if case .extended(let k) = editTarget, k == key { isEditing = true }
+                    if isEditing {
+                        palette.accent.setStroke()
+                        path.lineWidth = 2
+                        path.stroke()
+                    }
+                }
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        for (group, _, rects) in boxes() {
+            for (j, card) in group.cards.enumerated() where card.key != nil {
+                if rects[j].contains(p) {
+                    onEdit?(.extended(card.key!))
+                    return
+                }
+            }
+        }
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- colour inspector -------------------------------------------------------
+
+// HSL helpers for the inspector's channels, harmony and tones. Same formulas
+// as Aether's color.ts: h in degrees, s and l in percent.
+func hslComponents(_ hex: String) -> (h: Double, s: Double, l: Double) {
+    let clean = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+    guard clean.count == 6, let v = UInt64(clean, radix: 16) else { return (0, 0, 0) }
+    let r = Double((v >> 16) & 0xff) / 255
+    let g = Double((v >> 8) & 0xff) / 255
+    let b = Double(v & 0xff) / 255
+    let maxV = max(r, max(g, b)), minV = min(r, min(g, b))
+    let l = (maxV + minV) / 2
+    var h = 0.0, s = 0.0
+    if maxV != minV {
+        let d = maxV - minV
+        s = l > 0.5 ? d / (2 - maxV - minV) : d / (maxV + minV)
+        if maxV == r { h = ((g - b) / d + (g < b ? 6 : 0)) / 6 }
+        else if maxV == g { h = ((b - r) / d + 2) / 6 }
+        else { h = ((r - g) / d + 4) / 6 }
+    }
+    return (h * 360, s * 100, l * 100)
+}
+
+func hslHex(_ h: Double, _ s: Double, _ l: Double) -> String {
+    let hn = ((h.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360) / 360
+    let sn = min(100, max(0, s)) / 100
+    let ln = min(100, max(0, l)) / 100
+    if sn == 0 {
+        let v = Int((ln * 255).rounded())
+        return String(format: "#%02x%02x%02x", v, v, v)
+    }
+    let q = ln < 0.5 ? ln * (1 + sn) : ln + sn - ln * sn
+    let p = 2 * ln - q
+    func hue(_ t0: Double) -> Double {
+        var t = t0
+        if t < 0 { t += 1 }
+        if t > 1 { t -= 1 }
+        if t < 1.0 / 6.0 { return p + (q - p) * 6 * t }
+        if t < 1.0 / 2.0 { return q }
+        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6 }
+        return p
+    }
+    let r = Int((hue(hn + 1.0 / 3.0) * 255).rounded())
+    let g = Int((hue(hn) * 255).rounded())
+    let b = Int((hue(hn - 1.0 / 3.0) * 255).rounded())
+    return String(format: "#%02x%02x%02x", min(255, max(0, r)), min(255, max(0, g)), min(255, max(0, b)))
+}
+
+// One channel row, Aether's channel style: a gradient track with a white
+// handle and a typed value on the right.
+final class ChannelSliderView: NSView, NSTextFieldDelegate {
+    var label = ""
+    var suffix = ""
+    var minValue = 0.0
+    var maxValue = 255.0
+    var value = 0.0 { didSet { needsDisplay = true; syncField() } }
+    var gradient: [NSColor]?
+    var onChange: ((Double) -> Void)?
+    private let valueField = NSTextField()
+    private var dragging = false
+
+    static let rowHeight: CGFloat = 24
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        valueField.isBezeled = false
+        valueField.drawsBackground = false
+        valueField.textColor = palette.label
+        valueField.font = nerdFont("Regular", 11)
+        valueField.alignment = .right
+        valueField.focusRingType = .none
+        valueField.delegate = self
+        valueField.target = self
+        valueField.action = #selector(fieldReturn)
+        addSubview(valueField)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func setValue(_ v: Double, notify: Bool) {
+        value = v
+        syncField()
+        if notify { onChange?(v) }
+    }
+
+    func refreshColors() {
+        valueField.textColor = palette.label
+        needsDisplay = true
+    }
+
+    private func syncField() {
+        guard valueField.currentEditor() == nil else { return }
+        valueField.stringValue = "\(Int(value.rounded()))\(suffix)"
+    }
+
+    @objc private func fieldReturn() { commitField() }
+    func controlTextDidEndEditing(_ obj: Notification) { commitField() }
+
+    private func commitField() {
+        let raw = valueField.stringValue
+            .replacingOccurrences(of: "°", with: "")
+            .replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard let n = Double(raw) else { syncField(); return }
+        let v = min(maxValue, max(minValue, n))
+        if abs(v - value) > 1e-9 { setValue(v, notify: true) }
+        syncField()
+    }
+
+    private var trackRect: NSRect {
+        NSRect(x: 18, y: bounds.height / 2 - 4, width: max(10, bounds.width - 18 - 48), height: 8)
+    }
+
+    private func update(from p: NSPoint) {
+        let t = min(1, max(0, (p.x - trackRect.minX) / max(1, trackRect.width)))
+        setValue(minValue + Double(t) * (maxValue - minValue), notify: true)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard p.x >= 10, p.x <= bounds.width - 40 else { return }
+        dragging = true
+        update(from: p)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard dragging else { return }
+        update(from: convert(event.locationInWindow, from: nil))
+    }
+    override func mouseUp(with event: NSEvent) { dragging = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let mid = bounds.height / 2
+        drawMidLeft(label, nerdFont("Regular", 10), palette.muted,
+                    x: 0, midTop: mid, height: bounds.height)
+        let track = NSBezierPath(roundedRect: trackRect, xRadius: 2, yRadius: 2)
+        if let colors = gradient, colors.count >= 2 {
+            NSGradient(colors: colors)?.draw(in: track, angle: 0)
+        } else {
+            palette.itemBG.withAlphaComponent(0.6).setFill()
+            track.fill()
+        }
+        palette.muted.withAlphaComponent(0.3).setStroke()
+        track.lineWidth = 0.5
+        track.stroke()
+        let t = (value - minValue) / max(1e-9, maxValue - minValue)
+        let cx = trackRect.minX + CGFloat(t) * trackRect.width
+        let handle = NSBezierPath(roundedRect: NSRect(x: cx - 2, y: mid - 7, width: 4, height: 14),
+                                  xRadius: 1.5, yRadius: 1.5)
+        NSColor.white.setFill()
+        handle.fill()
+        NSColor.black.withAlphaComponent(0.6).setStroke()
+        handle.lineWidth = 1
+        handle.stroke()
+    }
+
+    override func layout() {
+        super.layout()
+        valueField.frame = NSRect(x: bounds.width - 44, y: bounds.height / 2 - 8, width: 44, height: 16)
+    }
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// The full colour inspector for the selected swatch: name and hex, contrast
+// against the palette's background and foreground, the RGB/HSL channels with
+// gradient tracks, harmony swatches, the 11-step tone row and the session's
+// recent colours. Harmony, tones and recents apply the colour they show.
+final class ColorInspectorView: NSView, NSTextFieldDelegate {
+    var onColor: ((String) -> Void)?
+
+    private let hexField = NSTextField()
+    private let tabs = SegmentedView()
+    private var rgbSliders: [ChannelSliderView] = []
+    private var hslSliders: [ChannelSliderView] = []
+
+    private(set) var hex = "#000000"
+    private var title = "No colour selected"
+    private var bgHex = "#000000"
+    private var fgHex = "#ffffff"
+    private var recents: [String] = []
+    private var active = false
+    private var syncing = false
+    private var tab = 0   // 0 RGB, 1 HSL
+
+    private var harmony: [(label: String, hex: String)] = []
+    private var tones: [String] = []
+    private var currentTone = -1
+
+    static let viewHeight: CGFloat = 292
+    static let harmonySpec: [(label: String, delta: Double)] = [
+        ("An−", -30), ("Tri+", 120), ("Comp", 180), ("Tri−", 240), ("An+", 30),
+    ]
+
+    // vertical plan, top down
+    private let headerTop: CGFloat = 0
+    private let contrastTop: CGFloat = 28
+    private let channelsTop: CGFloat = 48
+    private let channelRowsTop: CGFloat = 78
+    private let harmonyTop: CGFloat = 168
+    private let tonesTop: CGFloat = 226
+    private let recentTop: CGFloat = 266
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        hexField.isBezeled = false
+        hexField.drawsBackground = true
+        hexField.backgroundColor = palette.itemBG.withAlphaComponent(0.25)
+        hexField.textColor = palette.label
+        hexField.font = nerdFont("Regular", 11)
+        hexField.alignment = .center
+        hexField.focusRingType = .none
+        hexField.delegate = self
+        hexField.target = self
+        hexField.action = #selector(hexReturn)
+        addSubview(hexField)
+
+        tabs.items = ["RGB", "HSL"]
+        tabs.index = 0
+        tabs.onChange = { [weak self] i in
+            guard let self else { return }
+            self.tab = i
+            self.needsLayout = true
+            self.layoutSubtreeIfNeeded()
+            self.needsDisplay = true
+        }
+        addSubview(tabs)
+
+        for (i, label) in ["R", "G", "B"].enumerated() {
+            let s = ChannelSliderView()
+            s.label = label
+            s.minValue = 0
+            s.maxValue = 255
+            s.onChange = { [weak self] v in self?.rgbChanged(i, v) }
+            rgbSliders.append(s)
+            addSubview(s)
+        }
+        for (i, spec) in [("H", "°", 360.0), ("S", "%", 100.0), ("L", "%", 100.0)].enumerated() {
+            let s = ChannelSliderView()
+            s.label = spec.0
+            s.suffix = spec.1
+            s.minValue = 0
+            s.maxValue = spec.2
+            s.onChange = { [weak self] v in self?.hslChanged(i, v) }
+            hslSliders.append(s)
+            addSubview(s)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func update(hex: String?, title: String, active: Bool,
+                bgHex: String, fgHex: String, recent: [String]) {
+        syncing = true
+        self.title = title
+        self.active = active
+        self.bgHex = bgHex
+        self.fgHex = fgHex
+        self.recents = recent
+        self.hex = hex ?? "#000000"
+        if hexField.currentEditor() == nil { hexField.stringValue = hex ?? "" }
+        syncChannels()
+        syncing = false
+        recomputeDerivedSwatches()
+        needsDisplay = true
+        layoutSubtreeIfNeeded()
+    }
+
+    private func syncChannels() {
+        guard hex.count == 7, let v = UInt64(hex.dropFirst(), radix: 16) else { return }
+        let r = Double((v >> 16) & 0xff), g = Double((v >> 8) & 0xff), b = Double(v & 0xff)
+        rgbSliders[0].setValue(r, notify: false)
+        rgbSliders[1].setValue(g, notify: false)
+        rgbSliders[2].setValue(b, notify: false)
+        let hsl = hslComponents(hex)
+        hslSliders[0].setValue(hsl.h, notify: false)
+        hslSliders[1].setValue(hsl.s, notify: false)
+        hslSliders[2].setValue(hsl.l, notify: false)
+        hslSliders[0].gradient = stride(from: 0.0, through: 360.0, by: 30.0).map {
+            nsColor(fromHex: hslHex($0, max(40, hsl.s), min(70, max(30, hsl.l))))
+        }
+        hslSliders[1].gradient = [
+            nsColor(fromHex: hslHex(hsl.h, 0, hsl.l)),
+            nsColor(fromHex: hslHex(hsl.h, 50, hsl.l)),
+            nsColor(fromHex: hslHex(hsl.h, 100, hsl.l)),
+        ]
+        hslSliders[2].gradient = [
+            nsColor(fromHex: hslHex(hsl.h, hsl.s, 4)),
+            nsColor(fromHex: hslHex(hsl.h, hsl.s, 50)),
+            nsColor(fromHex: hslHex(hsl.h, hsl.s, 96)),
+        ]
+    }
+
+    private func recomputeDerivedSwatches() {
+        let hsl = hslComponents(hex)
+        harmony = Self.harmonySpec.map { ($0.label, hslHex(hsl.h + $0.delta, hsl.s, hsl.l)) }
+        tones = (0..<11).map { i in hslHex(hsl.h, hsl.s, 8 + Double(i) * 8.4) }
+        currentTone = (0..<11).first { abs((8 + Double($0) * 8.4) - hsl.l) < 4.2 } ?? -1
+    }
+
+    @objc private func hexReturn() { commitHex() }
+    func controlTextDidEndEditing(_ obj: Notification) { commitHex() }
+
+    private func commitHex() {
+        guard !syncing else { return }
+        guard let clean = cleanHex(hexField.stringValue) else {
+            hexField.stringValue = hex
+            return
+        }
+        if clean != hex { onColor?(clean) }
+    }
+
+    private func rgbChanged(_ index: Int, _ value: Double) {
+        guard !syncing, hex.count == 7, let v = UInt64(hex.dropFirst(), radix: 16) else { return }
+        var c = [Double((v >> 16) & 0xff), Double((v >> 8) & 0xff), Double(v & 0xff)]
+        c[index] = max(0, min(255, value.rounded()))
+        apply(String(format: "#%02x%02x%02x", Int(c[0]), Int(c[1]), Int(c[2])))
+    }
+
+    private func hslChanged(_ index: Int, _ value: Double) {
+        guard !syncing else { return }
+        var hsl = hslComponents(hex)
+        switch index {
+        case 0: hsl.h = value
+        case 1: hsl.s = value
+        default: hsl.l = value
+        }
+        apply(hslHex(hsl.h, hsl.s, hsl.l))
+    }
+
+    private func apply(_ out: String) {
+        hex = out
+        hexField.stringValue = out
+        syncChannels()
+        recomputeDerivedSwatches()
+        needsDisplay = true
+        onColor?(out)
+    }
+
+    // --- geometry ----------------------------------------------------------
+
+    private func swatchRow(count: Int, top: CGFloat, height: CGFloat) -> [NSRect] {
+        guard count > 0 else { return [] }
+        let gap: CGFloat = 4
+        let w = (bounds.width - CGFloat(count - 1) * gap) / CGFloat(count)
+        return (0..<count).map {
+            NSRect(x: CGFloat($0) * (w + gap), y: bounds.height - top - height, width: w, height: height)
+        }
+    }
+
+    private func harmonyRects() -> [NSRect] { swatchRow(count: harmony.count, top: harmonyTop, height: 28) }
+    private func toneRects() -> [NSRect] { swatchRow(count: tones.count, top: tonesTop, height: 22) }
+    private func recentRects() -> [NSRect] { swatchRow(count: recents.count, top: recentTop, height: 16) }
+
+    override func layout() {
+        super.layout()
+        hexField.frame = NSRect(x: bounds.width - 96, y: bounds.height - headerTop - 24,
+                                width: 96, height: 18)
+        let tabsSize = tabs.sizeThatFits()
+        tabs.frame = NSRect(x: bounds.width - tabsSize.width,
+                            y: bounds.height - channelsTop - tabsSize.height + 4,
+                            width: tabsSize.width, height: tabsSize.height)
+        let active = tab == 0 ? rgbSliders : hslSliders
+        for s in rgbSliders { s.isHidden = tab != 0 }
+        for s in hslSliders { s.isHidden = tab != 1 }
+        for (i, s) in active.enumerated() {
+            s.frame = NSRect(x: 0, y: bounds.height - channelRowsTop - CGFloat(i + 1) * ChannelSliderView.rowHeight,
+                             width: bounds.width, height: ChannelSliderView.rowHeight)
+        }
+    }
+
+    private func eyebrow(_ text: String, _ top: CGFloat) {
+        drawTopLeft(text, nerdFont("Bold", 9), palette.muted,
+                    x: 0, top: top, height: bounds.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if !active {
+            drawMidLeft("Click a colour card to edit it.", nerdFont("Regular", 11), palette.muted,
+                        x: 0, midTop: 12, height: bounds.height)
+            return
+        }
+        // header: preview + name + hex field
+        let preview = NSRect(x: 0, y: bounds.height - headerTop - 22, width: 22, height: 22)
+        let path = NSBezierPath(roundedRect: preview.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        nsColor(fromHex: hex).setFill()
+        path.fill()
+        palette.muted.withAlphaComponent(0.35).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        drawMidLeft(truncate(title, nerdFont("Bold", 11), bounds.width - 130),
+                    nerdFont("Bold", 11), palette.label,
+                    x: 30, midTop: headerTop + 11, height: bounds.height)
+
+        // contrast against the palette background and foreground
+        let bgRatio = contrastRatioHex(hex, bgHex)
+        let fgRatio = contrastRatioHex(hex, fgHex)
+        func level(_ r: Double) -> String {
+            r >= 7 ? "AAA" : (r >= 4.5 ? "AA" : (r >= 3 ? "AA-L" : "fail"))
+        }
+        let bgText = String(format: "%.1f \(level(bgRatio)) vs bg", bgRatio)
+        let fgText = String(format: "%.1f \(level(fgRatio)) vs fg", fgRatio)
+        let startX = drawColored(bgText, nerdFont("Regular", 9),
+                                 ink: bgRatio >= 4.5 ? .systemGreen : .systemRed,
+                                 x: 0, top: contrastTop, height: bounds.height)
+        _ = drawColored(fgText, nerdFont("Regular", 9),
+                        ink: fgRatio >= 4.5 ? .systemGreen : .systemRed,
+                        x: startX + 10, top: contrastTop, height: bounds.height)
+
+        eyebrow("Channels", channelsTop + 2)
+        eyebrow("Harmony", harmonyTop - 12)
+        eyebrow("Tones", tonesTop - 12)
+        if !recents.isEmpty { eyebrow("Recent", recentTop - 12) }
+
+        for (i, h) in harmony.enumerated() {
+            let r = harmonyRects()[i]
+            nsColor(fromHex: h.hex).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
+            drawMidCenter(h.label, nerdFont("Regular", 9), palette.muted,
+                          centerX: r.midX, midTop: bounds.height - r.minY + 8, height: bounds.height)
+        }
+        for (i, t) in tones.enumerated() {
+            let r = toneRects()[i]
+            nsColor(fromHex: t).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2).fill()
+            if i == currentTone {
+                NSColor.white.setStroke()
+                let ring = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1), xRadius: 2, yRadius: 2)
+                ring.lineWidth = 2
+                ring.stroke()
+            }
+        }
+        for (i, c) in recents.enumerated() {
+            let r = recentRects()[i]
+            nsColor(fromHex: c).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
+        }
+    }
+
+    // draws one text run and returns the x it ended at, so two runs can sit
+    // on one line with different inks
+    @discardableResult
+    private func drawColored(_ s: String, _ font: NSFont, ink: NSColor,
+                             x: CGFloat, top: CGFloat, height: CGFloat) -> CGFloat {
+        drawTopLeft(s, font, ink, x: x, top: top, height: height)
+        return x + advance(s, font)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard active else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        for (i, h) in harmony.enumerated() where harmonyRects()[i].contains(p) {
+            onColor?(h.hex)
+            return
+        }
+        for (i, t) in tones.enumerated() where toneRects()[i].contains(p) {
+            onColor?(t)
+            return
+        }
+        for (i, c) in recents.enumerated() where recentRects()[i].contains(p) {
+            onColor?(c)
+            return
+        }
+    }
+
+    func refreshColors() {
+        hexField.textColor = palette.label
+        hexField.backgroundColor = palette.itemBG.withAlphaComponent(0.25)
+        for s in rgbSliders + hslSliders { s.refreshColors() }
+        needsDisplay = true
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// --- editor columns ---------------------------------------------------------
+
+// The left column: Method, Mode, the curve box, the 12 sliders and Reset.
+// A thin view over the shared PaletteModel.
+final class PaletteBuilderView: NSView {
+    var model: PaletteModel? { didSet { wire() } }
+
+    private let scroll = NSScrollView()
+    private let scroller = CustomScroller()
+    private let doc = PaletteBuilderDoc()
+    private let scrollerW: CGFloat = 8
+    private var shownEditKey: String?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        scroll.hasVerticalScroller = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+        scroll.documentView = doc
+        addSubview(scroller)
+        scroller.scrollView = scroll
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func scrolled() { scroller.refresh() }
+
+    private func wire() {
+        doc.methodButton.onClick = { [weak self] in
+            guard let self, let model = self.model else { return }
+            var rows: [MethodPicker.Row] = [
+                MethodPicker.Row(header: nil, value: "magic", label: "Magic"),
+            ]
+            for group in model.modeGroups {
+                rows.append(MethodPicker.Row(header: group.label.uppercased(),
+                                             value: nil, label: group.label))
+                for m in group.modes {
+                    rows.append(MethodPicker.Row(header: nil, value: m.value, label: m.label))
+                }
+            }
+            MethodPicker.present(from: self.doc.methodButton, rows: rows, strips: model.strips,
+                                 currentMethod: model.method) { [weak model] value in
+                model?.chooseMethod(value)
+            }
+        }
+        doc.modeSeg.onChange = { [weak self] i in self?.model?.setMode(i) }
+        doc.curveView.onChange = { [weak self] points in self?.model?.setCurve(points) }
+        for slider in doc.sliders {
+            let key = slider.field.key
+            slider.onChange = { [weak self] v in self?.model?.setAdjustment(key, v) }
+        }
+        doc.resetButton.onClick = { [weak self] in self?.model?.resetAdjustments() }
+    }
+
+    func sync() {
+        guard let model else { return }
+        doc.methodButton.title = model.methodLabel(model.method)
+        doc.modeSeg.index = model.mode == "light" ? 2 : (model.mode == "dark" ? 1 : 0)
+        doc.modeSeg.needsDisplay = true
+        doc.curveView.points = model.curve
+        doc.curveView.histogram = model.histogram
+        for slider in doc.sliders {
+            slider.setValue(model.adjustments[slider.field.key], notify: false)
+        }
+        let editing = model.editTarget != nil
+        if doc.editorVisible != editing {
+            doc.editorVisible = editing
+            doc.inspector.isHidden = !editing
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+        }
+        let finals = model.finalColors.count == 16 ? model.finalColors : model.baseColors
+        doc.inspector.update(hex: model.editTargetHex(), title: model.editTargetTitle(),
+                             active: editing,
+                             bgHex: finals.first ?? "#000000",
+                             fgHex: finals.indices.contains(7) ? finals[7] : "#ffffff",
+                             recent: model.recentColors)
+        let editKey = editing ? (model.editTargetHex() ?? "") + "·" + model.editTargetTitle() : nil
+        if editKey != shownEditKey {
+            shownEditKey = editKey
+            if editKey != nil {
+                DispatchQueue.main.async { [weak self] in self?.doc.scrollInspectorIntoView() }
+            }
+        }
+        doc.needsDisplay = true
+        needsDisplay = true
+    }
+
+    func refreshColors() {
+        needsDisplay = true
+        markTree(doc)
+        for slider in doc.sliders { slider.refreshColors() }
+        doc.inspector.refreshColors()
+    }
+
+    private func markTree(_ view: NSView) {
+        view.needsDisplay = true
+        for sub in view.subviews { markTree(sub) }
+    }
+
+    override func layout() {
+        super.layout()
+        let headerH: CGFloat = 40
+        let h = max(0, bounds.height - headerH)
+        scroll.frame = NSRect(x: 0, y: 0, width: max(0, bounds.width - scrollerW - 14), height: h)
+        scroller.frame = NSRect(x: bounds.width - scrollerW, y: 0, width: scrollerW, height: h)
+        scroller.refresh()
+        let w = scroll.contentSize.width
+        let clipH = scroll.contentSize.height
+        let targetH = max(doc.contentHeight(), clipH)
+        if w > 0, (abs(doc.frame.width - w) > 0.5 || abs(doc.frame.height - targetH) > 0.5) {
+            let first = doc.frame.width == 0
+            doc.frame = NSRect(origin: .zero, size: NSSize(width: w, height: targetH))
+            doc.needsLayout = true
+            doc.layoutSubtreeIfNeeded()
+            if first {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, targetH - clipH)))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            scroller.refresh()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawMidLeft("Palette Builder", nerdFont("Bold", 13), palette.accent,
+                    x: 16, midTop: 18, height: bounds.height)
+    }
+}
+
+final class PaletteBuilderDoc: NSView {
+    let methodButton = PopupButtonView()
+    let modeSeg = SegmentedView()
+    let inspector = ColorInspectorView()
+    let curveView = CurveEditorView()
+    var sliders: [AdjustmentSliderView] = []
+    let resetButton = ButtonView()
+
+    // the inspector appears only while a card is selected
+    var editorVisible = false
+
+    private let insetL: CGFloat = 16
+    private let insetR: CGFloat = 12
+    private var methodTop: CGFloat = 0
+    private var modeTop: CGFloat = 0
+    private var editorTop: CGFloat = 0
+    private var adjTop: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        modeSeg.items = ["Auto", "Dark", "Light"]
+        addSubview(methodButton)
+        addSubview(modeSeg)
+        inspector.isHidden = true
+        addSubview(inspector)
+        addSubview(curveView)
+        for f in EditorAdjustments.fields {
+            let s = AdjustmentSliderView(field: f)
+            sliders.append(s)
+            addSubview(s)
+        }
+        resetButton.title = "Reset Adjustments"
+        resetButton.fontSize = 12
+        addSubview(resetButton)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private var contentW: CGFloat { max(0, bounds.width - insetL - insetR) }
+
+    // Brings the colour panel to the top of the left pane when a card is
+    // picked, so the controls the click opened are in view.
+    func scrollInspectorIntoView() {
+        guard editorVisible, let scroll = enclosingScrollView else { return }
+        layoutSubtreeIfNeeded()
+        let clip = scroll.contentView
+        let docH = bounds.height
+        let top = max(0, editorTop - 12)
+        let origin = min(max(0, docH - clip.bounds.height), max(0, docH - top - clip.bounds.height))
+        clip.scroll(to: NSPoint(x: 0, y: origin))
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    func contentHeight() -> CGFloat {
+        var h: CGFloat = 10
+        h += 34 + 34                                        // Method + Mode
+        if editorVisible { h += ColorInspectorView.viewHeight + 20 }
+        h += 24                                             // Adjustments
+        h += CurveEditorView.viewHeight + 8
+        h += CGFloat(sliders.count) * AdjustmentSliderView.rowHeight
+        h += 38                                             // Reset Adjustments
+        h += 10
+        return h
+    }
+
+    private func rect(top: CGFloat, h: CGFloat, x: CGFloat, w: CGFloat) -> NSRect {
+        NSRect(x: x, y: bounds.height - top - h, width: w, height: h)
+    }
+
+    override func layout() {
+        super.layout()
+        var top: CGFloat = 10
+        methodTop = top
+        methodButton.frame = rect(top: top + 3, h: 26, x: insetL + max(0, contentW - 170), w: 170)
+        top += 34
+        modeTop = top
+        let segSize = modeSeg.sizeThatFits()
+        modeSeg.frame = rect(top: top + 3, h: segSize.height,
+                             x: insetL + max(0, contentW - segSize.width), w: segSize.width)
+        top += 34
+        if editorVisible {
+            editorTop = top + 10
+            inspector.frame = rect(top: editorTop, h: ColorInspectorView.viewHeight,
+                                   x: insetL, w: contentW)
+            top += ColorInspectorView.viewHeight + 20
+        }
+        adjTop = top
+        top += 24
+        curveView.frame = rect(top: top, h: CurveEditorView.viewHeight, x: insetL, w: contentW)
+        top += CurveEditorView.viewHeight + 8
+        for s in sliders {
+            s.frame = rect(top: top, h: AdjustmentSliderView.rowHeight, x: insetL, w: contentW)
+            top += AdjustmentSliderView.rowHeight
+        }
+        top += 8
+        resetButton.frame = rect(top: top, h: 26, x: insetL, w: 150)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawMidLeft("Method", nerdFont("Bold", 12), palette.label,
+                    x: insetL, midTop: methodTop + 16, height: bounds.height)
+        drawMidLeft("Mode", nerdFont("Bold", 12), palette.label,
+                    x: insetL, midTop: modeTop + 16, height: bounds.height)
+        if editorVisible {
+            palette.muted.withAlphaComponent(0.25).setFill()
+            NSRect(x: insetL, y: bounds.height - (editorTop - 6), width: contentW, height: 1).fill()
+            NSRect(x: insetL, y: bounds.height - (adjTop - 10), width: contentW, height: 1).fill()
+        }
+        drawTopLeft("Adjustments", nerdFont("Bold", 12), palette.accent,
+                    x: insetL, top: adjTop, height: bounds.height)
+    }
+}
+
+// The centre column: the palette cards, the extended four and the inline
+// colour editor. The wallpaper and preview panes arrive in Phase 6 above
+// this document.
+final class PaletteCanvasView: NSView {
+    var model: PaletteModel? { didSet { wire(); sync() } }
+
+    private let scroll = NSScrollView()
+    private let scroller = CustomScroller()
+    private let doc = PaletteCanvasDoc()
+    private let scrollerW: CGFloat = 8
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        scroll.hasVerticalScroller = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+        scroll.documentView = doc
+        addSubview(scroller)
+        scroller.scrollView = scroll
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func scrolled() { scroller.refresh() }
+
+    private func wire() {
+        doc.colorCards.onEdit = { [weak self] target in self?.model?.selectForEdit(target) }
+        doc.colorCards.onToggleLock = { [weak self] i in self?.model?.toggleLock(i) }
+        doc.colorCards.onToggleSelect = { [weak self] i in self?.model?.toggleSelect(i) }
+        doc.semantic.onEdit = { [weak self] target in self?.model?.selectForEdit(target) }
+    }
+
+    func sync() {
+        guard let model else { return }
+        let finals = model.finalColors.count == 16 ? model.finalColors : model.baseColors
+        doc.colorCards.cards = model.baseColors.enumerated().map { i, base in
+            let label = PaletteModel.ansiLabels.indices.contains(i) ? PaletteModel.ansiLabels[i] : "\(i)"
+            return PaletteCardsView.Card(label: label,
+                                         hex: finals.indices.contains(i) ? finals[i] : base,
+                                         index: i, extendedKey: nil)
+        }
+        doc.colorCards.locked = model.locked
+        doc.colorCards.selected = model.selected
+        doc.colorCards.editTarget = model.editTarget
+        doc.colorCards.bgHex = finals.first ?? "#000000"
+        doc.methodText = "· \(model.methodLabel(model.method))"
+
+        func base(_ i: Int) -> String { finals.indices.contains(i) ? finals[i] : "#000000" }
+        func shade(_ key: String, _ fallback: Int) -> String {
+            model.shades[key] ?? base(fallback)
+        }
+        func ext(_ key: String) -> String {
+            model.finalExtended[key] ?? model.extendedHex[key] ?? "#000000"
+        }
+        doc.semantic.groups = [
+            SemanticSectionView.Group(title: "Background", cards: [
+                .init(label: "Darker", hex: shade("darker_bg", 0), key: nil),
+                .init(label: "Dark", hex: shade("dark_bg", 0), key: nil),
+                .init(label: "Base", hex: base(0), key: nil),
+                .init(label: "Lighter", hex: shade("lighter_bg", 0), key: nil),
+            ]),
+            SemanticSectionView.Group(title: "Foreground", cards: [
+                .init(label: "Muted", hex: base(8), key: nil),
+                .init(label: "Dark", hex: shade("dark_fg", 7), key: nil),
+                .init(label: "Base", hex: base(7), key: nil),
+                .init(label: "Light", hex: shade("light_fg", 7), key: nil),
+                .init(label: "Bright", hex: shade("bright_fg", 7), key: nil),
+            ]),
+            SemanticSectionView.Group(title: "Accent", cards: [
+                .init(label: "Orange", hex: shade("orange", 1), key: nil),
+                .init(label: "Brown", hex: shade("brown", 1), key: nil),
+            ]),
+            SemanticSectionView.Group(title: "UI", cards: [
+                .init(label: "Accent", hex: ext("accent"), key: "accent"),
+                .init(label: "Cursor", hex: ext("cursor"), key: "cursor"),
+                .init(label: "Sel FG", hex: ext("selection_foreground"), key: "selection_foreground"),
+                .init(label: "Sel BG", hex: ext("selection_background"), key: "selection_background"),
+            ]),
+        ]
+        doc.semantic.editTarget = model.editTarget
+        doc.needsDisplay = true
+        needsDisplay = true
+    }
+
+    func refreshColors() {
+        needsDisplay = true
+        markTree(doc)
+    }
+
+    private func markTree(_ view: NSView) {
+        view.needsDisplay = true
+        for sub in view.subviews { markTree(sub) }
+    }
+
+    override func layout() {
+        super.layout()
+        scroll.frame = NSRect(x: 0, y: 0, width: max(0, bounds.width - scrollerW - 14), height: bounds.height)
+        scroller.frame = NSRect(x: bounds.width - scrollerW, y: 0, width: scrollerW, height: bounds.height)
+        scroller.refresh()
+        let w = scroll.contentSize.width
+        let clipH = scroll.contentSize.height
+        let targetH = max(doc.contentHeight(), clipH)
+        if w > 0, (abs(doc.frame.width - w) > 0.5 || abs(doc.frame.height - targetH) > 0.5) {
+            let first = doc.frame.width == 0
+            doc.frame = NSRect(origin: .zero, size: NSSize(width: w, height: targetH))
+            doc.needsLayout = true
+            doc.layoutSubtreeIfNeeded()
+            if first {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, targetH - clipH)))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            scroller.refresh()
+        }
+    }
+}
+
+final class PaletteCanvasDoc: NSView {
+    let colorCards = PaletteCardsView()
+    let semantic = SemanticSectionView()
+    var methodText = ""
+
+    private let insetL: CGFloat = 16
+    private let insetR: CGFloat = 14
+    private var paletteTop: CGFloat = 0
+    private var hintTop: CGFloat = 0
+    private var semanticTop: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        colorCards.showsLocks = true
+        addSubview(colorCards)
+        addSubview(semantic)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private var contentW: CGFloat { max(0, bounds.width - insetL - insetR) }
+
+    func contentHeight() -> CGFloat {
+        var h: CGFloat = 12
+        h += 26                                             // "Palette 16 colors · …"
+        h += PaletteCardsView.height(for: 16)
+        h += 20                                             // hint line
+        h += 26                                             // "Semantic Colors"
+        h += SemanticSectionView.height()
+        h += 12
+        return h
+    }
+
+    private func rect(top: CGFloat, h: CGFloat, x: CGFloat, w: CGFloat) -> NSRect {
+        NSRect(x: x, y: bounds.height - top - h, width: w, height: h)
+    }
+
+    override func layout() {
+        super.layout()
+        var top: CGFloat = 12
+        paletteTop = top
+        top += 26
+        colorCards.frame = rect(top: top, h: PaletteCardsView.height(for: 16), x: insetL, w: contentW)
+        top += PaletteCardsView.height(for: 16)
+        hintTop = top + 2
+        top += 20
+        semanticTop = top
+        top += 26
+        semantic.frame = rect(top: top, h: SemanticSectionView.height(), x: insetL, w: contentW)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let h = bounds.height
+        drawTopLeft("Palette", nerdFont("Bold", 13), palette.label,
+                    x: insetL, top: paletteTop, height: h)
+        drawTopLeft(methodText, nerdFont("Regular", 11), palette.muted,
+                    x: insetL + 62, top: paletteTop + 2, height: h)
+        drawTopLeft("Click to edit · Shift-click to select; the padlock survives a Method change.",
+                    nerdFont("Regular", 10), palette.muted,
+                    x: insetL, top: hintTop, height: h)
+        drawTopLeft("Semantic Colors", nerdFont("Bold", 12), palette.accent,
+                    x: insetL, top: semanticTop, height: h)
+        drawTopLeft("Derived automatically.",
+                    nerdFont("Regular", 10), palette.muted,
+                    x: insetL + 118, top: semanticTop + 1, height: h)
+    }
+}
+
 final class ThemeEditorView: NSView {
     var onClose: (() -> Void)?
     var displayName = "" { didSet { needsDisplay = true } }
-    let paletteBuilder = EditorColumnView()
-    let previews = EditorColumnView()
+    let paletteBuilder = PaletteBuilderView()
+    let paletteCanvas = PaletteCanvasView()
     let wallpaperEditor = EditorColumnView()
 
     private let headerH: CGFloat = 56
@@ -2551,11 +4971,9 @@ final class ThemeEditorView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        paletteBuilder.title = "Palette Builder"
-        previews.title = "Previews"
         wallpaperEditor.title = "Wallpaper Editor"
         addSubview(paletteBuilder)
-        addSubview(previews)
+        addSubview(paletteCanvas)
         addSubview(wallpaperEditor)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -2570,7 +4988,7 @@ final class ThemeEditorView: NSView {
         super.layout()
         let h = max(0, bounds.height - headerH)
         paletteBuilder.frame = NSRect(x: 0, y: 0, width: leftW, height: h)
-        previews.frame = NSRect(x: leftW, y: 0, width: max(0, bounds.width - leftW - rightW), height: h)
+        paletteCanvas.frame = NSRect(x: leftW, y: 0, width: max(0, bounds.width - leftW - rightW), height: h)
         wallpaperEditor.frame = NSRect(x: bounds.width - rightW, y: 0, width: rightW, height: h)
     }
 
@@ -2616,12 +5034,13 @@ final class ThemeEditor {
     let window: EditorWindow
     private let root: ThemeEditorView
     private let subject: EditorSubject
+    private let model = PaletteModel()
     private var keyMonitor: Any?
     // what the later panels read: the edition's stored record, or the
     // draft's Magic seed
     private(set) var record: [String: Any]?
-    private(set) var magicColors: [String] = []
-    private(set) var magicRoles: [String: Any] = [:]
+    // set on any user change; Save/Apply clear it
+    private(set) var dirty = false
 
     private init(subject: EditorSubject, size: NSSize) {
         self.subject = subject
@@ -2630,6 +5049,14 @@ final class ThemeEditor {
                               styleMask: .borderless, backing: .buffered, defer: false)
         root.displayName = subject.displayName
         root.onClose = { [weak self] in self?.close() }
+        root.paletteBuilder.model = model
+        root.paletteCanvas.model = model
+        model.onUpdate = { [weak self] in
+            guard let self else { return }
+            self.root.paletteBuilder.sync()
+            self.root.paletteCanvas.sync()
+        }
+        model.onUserEdit = { [weak self] in self?.dirty = true }
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -2673,6 +5100,8 @@ final class ThemeEditor {
         guard let e = current else { return }
         e.root.needsDisplay = true
         for v in e.root.subviews { v.needsDisplay = true }
+        e.root.paletteBuilder.refreshColors()
+        e.root.paletteCanvas.refreshColors()
     }
 
     // Esc on the dashboard while the editor is up means "close the editor,
@@ -2693,7 +5122,14 @@ final class ThemeEditor {
         // monitors ignore an Esc aimed at another window
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
             guard let self, e.window === self.window else { return e }
-            if e.keyCode == 53 { self.close(); return nil }
+            if e.keyCode == 53 {
+                // Esc peels one layer at a time: selection, then the edited
+                // colour, then the editor itself
+                if self.model.clearSelection() { return nil }
+                if self.model.clearEditTarget() { return nil }
+                self.close()
+                return nil
+            }
             return e
         }
         loadSubject()
@@ -2702,34 +5138,99 @@ final class ThemeEditor {
     private func loadSubject() {
         switch subject {
         case .edition(let e):
+            let q = shellQuote(e.id)
             DispatchQueue.global().async { [weak self] in
-                let (code, out) = shell("\(HOME)/.local/bin/omacosy-themecore theme show "
-                    + shellQuote(e.id) + " 2>/dev/null")
+                let (code, out) = shell("\(themecoreBin()) theme show " + q + " 2>/dev/null")
                 guard code == 0, let data = out.data(using: .utf8),
                       let rec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 else { return }
-                DispatchQueue.main.async { self?.record = rec }
+                let (wc, wo) = shell("\(themecoreBin()) theme wallpaper " + q + " --json 2>/dev/null")
+                var image = ""
+                if wc == 0, let wd = wo.data(using: .utf8),
+                   let wobj = (try? JSONSerialization.jsonObject(with: wd)) as? [String: Any] {
+                    image = wobj["path"] as? String ?? ""
+                }
+                DispatchQueue.main.async {
+                    self?.record = rec
+                    guard !image.isEmpty else { return }
+                    self?.model.seedEdition(record: rec, image: image)
+                }
             }
         case .draft(let wallpaper):
             let q = shellQuote(wallpaper)
             DispatchQueue.global().async { [weak self] in
+                guard let self else { return }
+                // Fast path: the derived theme the Themes grid already shows.
+                // Its 16 colours ARE the Magic palette (the Phase 2
+                // cross-check pins them), and term-palette reads them in
+                // milliseconds instead of a fresh extraction (~0.6 s on 4K).
+                let (rc, rout) = shell("\(HOME)/.local/bin/omacosy-custom-theme theme --raw \(q) 2>/dev/null")
+                let dir = rout.split(separator: "\n").last.map(String.init)?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+                if rc == 0, !dir.isEmpty {
+                    let envFile = NSTemporaryDirectory()
+                        + "omacosy-editor-seed-\(ProcessInfo.processInfo.processIdentifier).env"
+                    let (tc, _) = shell("\(HOME)/.local/bin/omacosy-term-palette \(shellQuote(dir)) \(shellQuote(envFile)) >/dev/null 2>&1")
+                    var byIndex: [Int: String] = [:]
+                    var accent: String?
+                    var resolved = "dark"
+                    if tc == 0, let text = try? String(contentsOfFile: envFile, encoding: .utf8) {
+                        for line in text.split(separator: "\n") {
+                            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+                            guard parts.count == 2 else { continue }
+                            let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                            if parts[0].hasPrefix("OMACOSY_P"), let i = Int(parts[0].dropFirst(9)) {
+                                byIndex[i] = value
+                            } else if parts[0] == "OMACOSY_ACCENT" {
+                                accent = value
+                            } else if parts[0] == "OMACOSY_IS_DARK" {
+                                resolved = value == "1" ? "dark" : "light"
+                            }
+                        }
+                    }
+                    try? FileManager.default.removeItem(atPath: envFile)
+                    let colors = (0..<16).compactMap { byIndex[$0] }
+                    if colors.count == 16 {
+                        DispatchQueue.main.async {
+                            self.model.seedDraft(image: wallpaper, colors: colors,
+                                                 accent: accent, resolved: resolved)
+                        }
+                        return
+                    }
+                }
+                // Fallback: a fresh extraction; the two calls run in parallel.
+                let lock = NSLock()
                 var colors: [String] = []
                 var roles: [String: Any] = [:]
-                let (c1, o1) = shell("\(HOME)/.local/bin/omacosy-themecore palette magic \(q) --json 2>/dev/null")
-                if c1 == 0, let data = o1.data(using: .utf8),
-                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    colors = obj["colors"] as? [String] ?? []
+                let group = DispatchGroup()
+                group.enter()
+                DispatchQueue.global().async {
+                    let (c, o) = shell("\(themecoreBin()) palette magic \(q) --json 2>/dev/null")
+                    if c == 0, let d = o.data(using: .utf8),
+                       let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+                        lock.lock(); colors = obj["colors"] as? [String] ?? []; lock.unlock()
+                    }
+                    group.leave()
                 }
-                // the role accent, never colors[4]: on the Phase 3 near-black
-                // wallpaper colors[4] gave blue where the bar shows white
-                let (c2, o2) = shell("\(HOME)/.local/bin/omacosy-themecore palette magic \(q) --roles --json 2>/dev/null")
-                if c2 == 0, let data = o2.data(using: .utf8),
-                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    roles = obj
+                group.enter()
+                DispatchQueue.global().async {
+                    let (c, o) = shell("\(themecoreBin()) palette magic \(q) --roles --json 2>/dev/null")
+                    if c == 0, let d = o.data(using: .utf8),
+                       let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+                        lock.lock(); roles = obj; lock.unlock()
+                    }
+                    group.leave()
                 }
+                group.wait()
+                lock.lock()
+                let finalColors = colors
+                let accent = roles["accent"] as? String
+                let resolved = (roles["ladder"] as? String) == "light" ? "light" : "dark"
+                lock.unlock()
                 DispatchQueue.main.async {
-                    self?.magicColors = colors
-                    self?.magicRoles = roles
+                    guard finalColors.count == 16 else { return }
+                    self.model.seedDraft(image: wallpaper, colors: finalColors,
+                                         accent: accent, resolved: resolved)
                 }
             }
         }
@@ -2739,6 +5240,7 @@ final class ThemeEditor {
         guard ThemeEditor.current === self else { return }
         ThemeEditor.current = nil
         if let k = keyMonitor { NSEvent.removeMonitor(k); keyMonitor = nil }
+        model.teardown()
         if let dash = window.parent as? DashboardWindow {
             dash.hideSuppressed = false
             dash.removeChildWindow(window)

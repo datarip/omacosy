@@ -39,6 +39,7 @@
 //   omacosy-themecore palette analyze <op> ...                                   (test support)
 //   omacosy-themecore wallpaper scan [--dir DIR] [--json]                        (test support)
 //   omacosy-themecore image info <path> [--json]
+//   omacosy-themecore image histogram <path> [--json]
 //   omacosy-themecore version [--json]
 //
 // Every verb takes --json and then prints one JSON value on stdout.
@@ -3439,6 +3440,63 @@ func sampleImage(url: URL) throws -> SampleResult {
                         pixels: pixels, mean: mean, digest: digest)
 }
 
+// The 256-bin luminance histogram of an image, for the tone-curve backdrop.
+// Ported from Aether's computeHistogram (frontend canvas-filters.ts): the
+// image is drawn at no more than 512 px wide in sRGB and every pixel lands
+// in bin (r*77 + g*150 + b*29) >> 8, its BT.601 luma.
+func imageHistogram(url: URL, maxWidth: Int = 512) throws -> [Int] {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = props[kCGImagePropertyPixelWidth] as? Int,
+          let height = props[kCGImagePropertyPixelHeight] as? Int else {
+        throw ThemeError(message: "cannot read image: \(url.path)")
+    }
+    guard width > 0, height > 0,
+          width <= Extract.maxImageDimension, height <= Extract.maxImageDimension,
+          width * height <= Extract.maxImagePixels else {
+        throw ThemeError(message: "unsafe image dimensions \(width)x\(height)")
+    }
+    guard let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw ThemeError(message: "cannot decode image: \(url.path)")
+    }
+
+    let dw = min(width, maxWidth)
+    let dh = max(1, Int((Double(height) * Double(dw) / Double(width)).rounded()))
+    let bytesPerRow = dw * 4
+    let byteCount = bytesPerRow * dh
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
+    defer { buffer.deallocate() }
+    buffer.initialize(repeating: 0, count: byteCount)
+
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(data: buffer, width: dw, height: dh, bitsPerComponent: 8,
+                                  bytesPerRow: bytesPerRow, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+        throw ThemeError(message: "cannot create the sRGB bitmap for \(url.path)")
+    }
+    context.interpolationQuality = .high
+    context.draw(cg, in: CGRect(x: 0, y: 0, width: dw, height: dh))
+
+    var histogram = [Int](repeating: 0, count: 256)
+    for y in 0..<dh {
+        for x in 0..<dw {
+            let offset = y * bytesPerRow + x * 4
+            let alpha = buffer[offset + 3]
+            if alpha < 128 { continue }
+            var r = Int(buffer[offset]), g = Int(buffer[offset + 1]), b = Int(buffer[offset + 2])
+            if alpha != 255 {
+                let a = Double(alpha) / 255.0
+                r = min(255, Int((Double(r) / a).rounded()))
+                g = min(255, Int((Double(g) / a).rounded()))
+                b = min(255, Int((Double(b) / a).rounded()))
+            }
+            let luma = (r * 77 + g * 150 + b * 29) >> 8
+            histogram[min(255, max(0, luma))] += 1
+        }
+    }
+    return histogram
+}
+
 // MARK: - Theme records (schema v1)
 
 // One JSON file per theme under ~/.config/omacosy/themes/. The typed fields
@@ -4652,6 +4710,7 @@ func usage() -> Never {
            omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]
            omacosy-themecore palette analyze <op> ...
            omacosy-themecore image info <path> [--json]
+           omacosy-themecore image histogram <path> [--json]
            omacosy-themecore version [--json]
 
     """.data(using: .utf8)!)
@@ -5569,6 +5628,31 @@ case "palette":
             exit(0)
         } catch { themeError(error) }
 
+    // Aether's derived shade variables (template.BuildVariables): the ramps
+    // behind the semantic colour groups. Pure composition of the already
+    // fixture-pinned darken/lighten maths.
+    case "shades":
+        guard let colorsRaw = takeFlag("--colors") else {
+            fail("palette shades needs --colors (#rrggbb,#rrggbb,...)")
+        }
+        let colors = hexListArgument(colorsRaw)
+        guard colors.count == 16 else { fail("palette shades needs exactly 16 colours") }
+        noExtraArguments()
+        let orange = ColorMath.lightened(colors[1], 15)
+        let shades: [(String, String)] = [
+            ("darker_bg", ColorMath.darkened(colors[0], 50)),
+            ("dark_bg", ColorMath.darkened(colors[0], 75)),
+            ("lighter_bg", ColorMath.lightened(colors[0], 10)),
+            ("dark_fg", ColorMath.darkened(colors[7], 75)),
+            ("light_fg", ColorMath.lightened(colors[7], 15)),
+            ("bright_fg", ColorMath.lightened(colors[7], 25)),
+            ("orange", orange),
+            ("brown", ColorMath.darkened(orange, 60)),
+        ]
+        if jsonOut { printJSON(Dictionary(uniqueKeysWithValues: shades)) }
+        for (key, hex) in shades { print("\(key) \(hex)") }
+        exit(0)
+
     case "render":
         guard let colorsRaw = takeFlag("--colors") else {
             fail("palette render needs --colors (#rrggbb,#rrggbb,...)")
@@ -5821,6 +5905,22 @@ case "image":
             print("  alpha       \(sample.hasAlpha ? "yes" : "no")")
             print("  samples     \(sample.pixels.count)")
             print("  sample mean \(meanR), \(meanG), \(meanB)")
+            exit(0)
+        } catch { themeError(error) }
+
+    case "histogram":
+        do {
+            guard let raw = args.first else { throw ThemeError(message: "image histogram needs a path") }
+            args.removeFirst()
+            noExtraArguments()
+            let path = Wallpapers.resolved(raw)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+                throw ThemeError(message: "no such image: \(path)")
+            }
+            let bins = try imageHistogram(url: URL(fileURLWithPath: path))
+            if jsonOut { printJSON(["path": path, "bins": bins]) }
+            bins.forEach { print($0) }
             exit(0)
         } catch { themeError(error) }
 

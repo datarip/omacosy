@@ -17,6 +17,7 @@
 
 import Cocoa
 import ImageIO
+import UniformTypeIdentifiers
 
 let HOME = NSHomeDirectory()
 
@@ -150,6 +151,72 @@ func setConfKey(_ file: String, _ key: String, _ value: String) -> Bool {
     text = lines.joined(separator: "\n") + "\n"
     do { try text.write(toFile: file, atomically: true, encoding: .utf8); return true }
     catch { return false }
+}
+
+// --- secrets ---------------------------------------------------------------
+
+let SECRETS = HOME + "/.config/omacosy/secrets.conf"
+
+func readSecret(_ key: String) -> String {
+    guard let text = try? String(contentsOfFile: SECRETS, encoding: .utf8) else { return "" }
+    for raw in text.split(separator: "\n") {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { continue }
+        if t[..<eq].trimmingCharacters(in: .whitespaces) == key {
+            return String(t[t.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+        }
+    }
+    return ""
+}
+
+// secrets.conf holds credentials, so it is the one config file that must
+// not be world-readable and must not be half-written. The temp file is
+// created with mode 600 BEFORE any value is written, flushed to disk, then
+// renamed over the old file. Nothing here shells out, so the value cannot
+// reach a log or a transcript. An empty value removes the key, which is
+// what clearing the field in the API Keys tab does.
+@discardableResult
+func writeSecret(_ key: String, _ value: String) -> Bool {
+    let dir = HOME + "/.config/omacosy"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    var lines: [String] = []
+    if let text = try? String(contentsOfFile: SECRETS, encoding: .utf8) {
+        lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if let last = lines.last, last.isEmpty { lines.removeLast() }
+    }
+    let clean = value.replacingOccurrences(of: "\n", with: "")
+    var out: [String] = []
+    var found = false
+    for line in lines {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        let eq = t.firstIndex(of: "=")
+        let k = eq.map { t[..<$0].trimmingCharacters(in: .whitespaces) } ?? ""
+        if !t.hasPrefix("#"), k == key {
+            found = true
+            if !clean.isEmpty { out.append("\(key)=\(clean)") }
+        } else {
+            out.append(line)
+        }
+    }
+    if !found && !clean.isEmpty { out.append("\(key)=\(clean)") }
+    if out.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+        _ = unlink(SECRETS)
+        return true
+    }
+    let text = out.joined(separator: "\n") + "\n"
+
+    let tmp = SECRETS + ".tmp"
+    _ = unlink(tmp)
+    let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    guard fd >= 0 else { return false }
+    let data = Array(text.utf8)
+    let written = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    _ = fsync(fd)
+    _ = close(fd)
+    guard written == data.count else { _ = unlink(tmp); return false }
+    guard rename(tmp, SECRETS) == 0 else { _ = unlink(tmp); return false }
+    _ = chmod(SECRETS, 0o600)
+    return true
 }
 
 // --- logo ------------------------------------------------------------------
@@ -386,7 +453,7 @@ final class SegmentedView: NSView {
 }
 
 final class ButtonView: NSView {
-    var title = "Save"
+    var title = "Save" { didSet { needsDisplay = true } }
     var fontSize: CGFloat = 13
     // icon buttons centre on the glyph's own box; text buttons centre on cap
     // height, which reads better for words
@@ -401,10 +468,14 @@ final class ButtonView: NSView {
         let text = busy ? "Saving…" : title
         let font = nerdFont("Bold", fontSize)
         if centeredByBounds {
-            let attr = NSAttributedString(string: text,
-                attributes: [.font: font, .foregroundColor: palette.barBG])
-            let sz = attr.size()
-            attr.draw(at: NSPoint(x: bounds.midX - sz.width / 2, y: bounds.midY - sz.height / 2))
+            // centre on the glyph's ink, not its line box: nerd-font icons
+            // carry odd metrics and drift high/left in a line-box centre
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+            let line = textLine(text, font, palette.barBG)
+            let ink = CTLineGetImageBounds(line, ctx)
+            ctx.textPosition = CGPoint(x: bounds.midX - ink.midX,
+                                       y: bounds.midY - ink.midY)
+            CTLineDraw(line, ctx)
         } else {
             drawMidCenter(text, font, palette.barBG,
                           centerX: bounds.midX, midTop: bounds.height / 2, height: bounds.height)
@@ -1758,6 +1829,56 @@ func customVariants() -> [ThemeCell] {
     }
 }
 
+// --- wallpapers tab data ---------------------------------------------------
+
+// The configured folder, read from the CLI so the dashboard and
+// `omacosy-custom-theme status` can never disagree. status prints the path
+// even while auto-theme is off, which is what lets this tab work before the
+// feature is switched on.
+func wallpapersDir() -> String {
+    let (_, out) = shell("\(HOME)/.local/bin/omacosy-custom-theme status 2>/dev/null")
+    for line in out.split(separator: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("wallpaper directory"), let r = t.range(of: ":") else { continue }
+        let d = t[r.upperBound...].trimmingCharacters(in: .whitespaces)
+        if !d.isEmpty { return d }
+    }
+    return HOME + "/Pictures/wallpapers"
+}
+
+enum WallpaperImport { case added, skipped, failed }
+
+// Copy, never move: the user's file stays where it was, and picking an
+// image already in the folder is skipped — compared by content against
+// every file in the folder, not just against a same-named file, so the
+// same picture under a new name does not pile up. A name already taken by
+// genuinely different content gets a -2/-3 suffix; nothing is ever
+// overwritten.
+func importWallpaper(_ src: String, into dir: String) -> WallpaperImport {
+    let fm = FileManager.default
+    let name = (src as NSString).lastPathComponent
+    guard isImageFile(name) else { return .failed }
+    do { try fm.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+    catch { return .failed }
+    let entries = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+    for e in entries where isImageFile(e) {
+        let p = dir + "/" + e
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: p, isDirectory: &isDir), !isDir.boolValue else { continue }
+        if fm.contentsEqual(atPath: src, andPath: p) { return .skipped }
+    }
+    var dest = dir + "/" + name
+    var n = 2
+    while fm.fileExists(atPath: dest) {
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        dest = dir + "/\(base)-\(n)" + (ext.isEmpty ? "" : ".\(ext)")
+        n += 1
+    }
+    do { try fm.copyItem(atPath: src, toPath: dest); return .added }
+    catch { return .failed }
+}
+
 func hexColor(_ s: String) -> NSColor? {
     var h = s
     if h.hasPrefix("#") { h.removeFirst() }
@@ -1848,9 +1969,6 @@ final class ThemeGridView: NSView {
     var headers: [(NSRect, String)] = []
     var lockedMessageRect = NSRect.zero
     var onApplied: ((String) -> Void)?
-    let directoryButton = ButtonView()
-    let chooseButton = ButtonView()
-    var onChoose: (() -> Void)?
     private var hoveredIndex: Int?
     private var hoverTracking: NSTrackingArea?
 
@@ -1863,17 +1981,6 @@ final class ThemeGridView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        directoryButton.title = "\u{f07b}"
-        // an icon glyph, not text: centre it on its own box, not cap height
-        directoryButton.centeredByBounds = true
-        directoryButton.onClick = { [weak self] in
-            guard let d = self?.customDir else { return }
-            NSWorkspace.shared.open(URL(fileURLWithPath: d))
-        }
-        chooseButton.title = "Choose…"
-        chooseButton.onClick = { [weak self] in self?.onChoose?() }
-        addSubview(directoryButton)
-        addSubview(chooseButton)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -1939,14 +2046,6 @@ final class ThemeGridView: NSView {
         customHeaderRect = flip(customHeaderRect)
         separatorRect = flip(separatorRect)
 
-        // custom header controls
-        let showControls = isCustomOn
-        directoryButton.isHidden = !showControls
-        chooseButton.isHidden = !showControls
-        if showControls {
-            chooseButton.frame = NSRect(x: customHeaderRect.maxX - 86, y: customHeaderRect.midY - 13, width: 86, height: 26)
-            directoryButton.frame = NSRect(x: chooseButton.frame.minX - 34, y: customHeaderRect.midY - 13, width: 28, height: 26)
-        }
         frame.size = NSSize(width: W, height: contentH)
         needsDisplay = true
     }
@@ -1981,17 +2080,11 @@ final class ThemeGridView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // section labels only: the folder buttons live in the Wallpapers tab,
+        // which owns the directory
         for (r, title) in headers {
-            // label, path and the two buttons all centre on the same line
-            let mid = bounds.height - r.midY
             drawMidLeft(title, nerdFont("Bold", 13), palette.accent,
-                        x: 0, midTop: mid, height: bounds.height)
-            if title == "Custom Themes", let d = customDir, isCustomOn {
-                let tw = advance(title, nerdFont("Bold", 13)) + 14
-                let maxPath = r.width - 130 - tw
-                drawMidLeft(truncate(d, nerdFont("Regular", 11), max(80, maxPath)), nerdFont("Regular", 11),
-                            palette.muted, x: tw, midTop: mid, height: bounds.height)
-            }
+                        x: 0, midTop: bounds.height - r.midY, height: bounds.height)
         }
         if !isCustomOn {
             drawTopLeft("Turn on Auto-Theme to preview your wallpapers",
@@ -2141,7 +2234,6 @@ final class ThemesTabView: NSView, ScrollStepTab {
         scroll.documentView = grid
         addSubview(scroller)
         scroller.scrollView = scroll
-        grid.onChoose = { [weak self] in self?.chooseDirectory() }
         grid.onApplied = { [weak self] title in
             self?.status = "Applied \(title)"
             self?.needsDisplay = true
@@ -2251,17 +2343,295 @@ final class ThemesTabView: NSView, ScrollStepTab {
                         x: 0, top: bounds.height - 14, height: bounds.height)
         }
     }
+}
+
+// --- storage tab -----------------------------------------------------------
+
+// where the local wallpapers folder is set and fed
+final class StorageTabView: NSView {
+    private let browseButton = ButtonView()
+    private let addButton = ButtonView()
+    private let chooseButton = ButtonView()
+    private var dir = ""
+    private var status = ""
+    // three buttons right-aligned as one group, in the compact size the
+    // Options/Workspaces "Add App" buttons use: font 12, 24 high
+    private let chooseW: CGFloat = 86
+    private let addW: CGFloat = 86
+    private let folderW: CGFloat = 26
+    private let gap: CGFloat = 6
+
+    func refreshColors() {
+        browseButton.needsDisplay = true
+        addButton.needsDisplay = true
+        chooseButton.needsDisplay = true
+        needsDisplay = true
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        browseButton.title = "\u{f07b}"
+        // an icon glyph, not text: centre it on its own box, not cap height
+        browseButton.centeredByBounds = true
+        browseButton.fontSize = 12
+        browseButton.toolTip = "Open the Wallpaper Folder"
+        browseButton.onClick = { [weak self] in
+            guard let d = self?.dir, !d.isEmpty else { return }
+            NSWorkspace.shared.open(URL(fileURLWithPath: d))
+        }
+        addButton.title = "Add Images"
+        addButton.fontSize = 12
+        addButton.onClick = { [weak self] in self?.addFiles() }
+        chooseButton.title = "Set Folder"
+        chooseButton.fontSize = 12
+        chooseButton.toolTip = "Change the Wallpaper Folder"
+        chooseButton.onClick = { [weak self] in self?.chooseDirectory() }
+        addSubview(browseButton)
+        addSubview(addButton)
+        addSubview(chooseButton)
+        reload()
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { reload() }
+    }
+
+    // the folder is the CLI's answer, so the path shown and the path
+    // omacosy-custom-theme writes to can never disagree
+    func reload() {
+        dir = wallpapersDir()
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        let y = bounds.height - 28
+        chooseButton.frame = NSRect(x: bounds.width - chooseW, y: y, width: chooseW, height: 24)
+        addButton.frame = NSRect(x: chooseButton.frame.minX - gap - addW, y: y, width: addW, height: 24)
+        browseButton.frame = NSRect(x: addButton.frame.minX - gap - folderW, y: y, width: folderW, height: 24)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // the Themes tab's Custom Themes header, verbatim: label, path and
+        // the buttons centre on one line
+        let mid = browseButton.frame.midY
+        drawMidLeft("Local Wallpapers", nerdFont("Bold", 13), palette.accent,
+                    x: 0, midTop: bounds.height - mid, height: bounds.height)
+        let tw = advance("Local Wallpapers", nerdFont("Bold", 13)) + 14
+        // the folder we ship with is marked, so it is clear the path was
+        // set for the user and can be changed with Set Folder
+        let marker = dir == HOME + "/Pictures/wallpapers" ? " (default)" : ""
+        let markerW = marker.isEmpty ? 0 : advance(marker, nerdFont("Regular", 11))
+        let pathW = max(80, browseButton.frame.minX - tw - 16 - markerW)
+        drawMidLeft(truncate(dir, nerdFont("Regular", 11), pathW) + marker,
+                    nerdFont("Regular", 11), palette.muted,
+                    x: tw, midTop: bounds.height - mid, height: bounds.height)
+        if !status.isEmpty {
+            drawTopLeft(truncate(status, nerdFont("Regular", 11), bounds.width),
+                        nerdFont("Regular", 11), palette.muted,
+                        x: 0, top: 44, height: bounds.height)
+        }
+    }
+
+    // Images picked from anywhere — a USB key, a NAS, another folder — are
+    // copied into the configured folder (never moved), so they become the
+    // next Wallpaper #N in Themes without extra steps.
+    private func addFiles() {
+        guard let dash = window as? DashboardWindow else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.allowedContentTypes = [.image]
+        // as a sheet the panel can never fall behind the popUpMenu-level
+        // dashboard card, which a runModal panel does
+        dash.hideSuppressed = true
+        panel.beginSheetModal(for: dash) { [weak self] resp in
+            dash.hideSuppressed = false
+            guard let self, resp == .OK else { return }
+            let sources = panel.urls.map { $0.path }
+            guard !sources.isEmpty else { return }
+            self.status = "Adding…"
+            self.needsDisplay = true
+            let dest = self.dir
+            DispatchQueue.global().async {
+                var added = 0, skipped = 0, failed = 0
+                for s in sources {
+                    switch importWallpaper(s, into: dest) {
+                    case .added: added += 1
+                    case .skipped: skipped += 1
+                    case .failed: failed += 1
+                    }
+                }
+                DispatchQueue.main.async {
+                    var parts: [String] = []
+                    if added > 0 { parts.append("\(added) added") }
+                    if skipped > 0 { parts.append("\(skipped) already in the folder") }
+                    if failed > 0 { parts.append("\(failed) could not be copied") }
+                    self.status = parts.joined(separator: ", ")
+                    self.needsDisplay = true
+                }
+            }
+        }
+    }
 
     private func chooseDirectory() {
+        guard let dash = window as? DashboardWindow else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Use This Folder"
-        if panel.runModal() == .OK, let url = panel.url {
+        // as a sheet the panel can never fall behind the popUpMenu-level
+        // dashboard card, which a runModal panel does
+        dash.hideSuppressed = true
+        panel.beginSheetModal(for: dash) { [weak self] resp in
+            dash.hideSuppressed = false
+            guard resp == .OK, let url = panel.url else { return }
             _ = shell("\(HOME)/.local/bin/omacosy-custom-theme path \(shellQuote(url.path))")
-            reload()
+            self?.reload()
         }
+    }
+}
+
+// --- api keys tab ----------------------------------------------------------
+
+final class APIKeysTabView: NSView, NSTextFieldDelegate {
+    private let field = NSSecureTextField()
+    private let plainField = NSTextField()
+    private let eyeButton = ButtonView()
+    private var revealed = false
+    private var pendingSave: DispatchWorkItem?
+    // matches the compact buttons, so the box and the eye line up
+    private let boxH: CGFloat = 24
+    // the field itself is only as tall as its text: AppKit draws the value
+    // near the top of a taller field, which read as uncentred. The visible
+    // box is drawn around it, the text can't drift.
+    private let fieldH: CGFloat = 16
+    private var status = ""
+
+    func refreshColors() {
+        field.textColor = palette.label
+        field.backgroundColor = palette.itemBG.withAlphaComponent(0.35)
+        plainField.textColor = palette.label
+        plainField.backgroundColor = palette.itemBG.withAlphaComponent(0.35)
+        eyeButton.needsDisplay = true
+        needsDisplay = true
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        for f in [field, plainField] {
+            f.isBezeled = false
+            f.drawsBackground = true
+            f.backgroundColor = palette.itemBG.withAlphaComponent(0.35)
+            f.textColor = palette.label
+            f.font = nerdFont("Regular", 12)
+            f.focusRingType = .none
+            f.delegate = self
+            f.target = self
+            f.action = #selector(persistNow)
+            addSubview(f)
+        }
+        plainField.isHidden = true
+        eyeButton.title = "\u{f070}"
+        eyeButton.centeredByBounds = true
+        eyeButton.fontSize = 12
+        eyeButton.toolTip = "Show the Key"
+        eyeButton.onClick = { [weak self] in self?.toggleReveal() }
+        addSubview(eyeButton)
+        let key = readSecret("wallhaven")
+        field.stringValue = key
+        plainField.stringValue = key
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    // the native placeholder sat high in the taller field; this draws it on
+    // the same mid line as the value so an empty field reads centred
+    func controlTextDidChange(_ obj: Notification) {
+        if let src = obj.object as? NSTextField {
+            let other: NSTextField = src === field ? plainField : field
+            if other.stringValue != src.stringValue { other.stringValue = src.stringValue }
+        }
+        scheduleSave()
+        needsDisplay = true
+    }
+
+    private var activeField: NSTextField { revealed ? plainField : field }
+
+    // one field is always hidden; the eye swaps which, keeping the text
+    private func toggleReveal() {
+        revealed.toggle()
+        let value = activeField.stringValue
+        field.stringValue = value
+        plainField.stringValue = value
+        field.isHidden = revealed
+        plainField.isHidden = !revealed
+        eyeButton.title = revealed ? "\u{f06e}" : "\u{f070}"
+        eyeButton.toolTip = revealed ? "Hide the Key" : "Show the Key"
+        window?.makeFirstResponder(activeField)
+        if let editor = activeField.currentEditor() {
+            editor.selectedRange = NSRange(location: (value as NSString).length, length: 0)
+        }
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        let w = min(420, max(160, bounds.width - 60))
+        let boxY = bounds.height - 52 - boxH
+        field.frame = NSRect(x: 0, y: boxY + (boxH - fieldH) / 2, width: w, height: fieldH)
+        plainField.frame = field.frame
+        eyeButton.frame = NSRect(x: w + 12, y: boxY, width: 26, height: 24)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawTopLeft("Wallhaven.cc API Key", nerdFont("Bold", 13), palette.accent,
+                    x: 0, top: 0, height: bounds.height)
+        drawTopLeft(truncate("Optional: Create an account and go to https://wallhaven.cc/settings/account to get your API Key. Needed for NSFW content.",
+                             nerdFont("Regular", 11), bounds.width),
+                    nerdFont("Regular", 11), palette.muted, x: 0, top: 22, height: bounds.height)
+        let box = NSRect(x: field.frame.minX - 0.5,
+                         y: field.frame.minY - (boxH - fieldH) / 2 - 0.5,
+                         width: field.frame.width + 1, height: boxH + 1)
+        let border = NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6)
+        palette.muted.withAlphaComponent(0.35).setStroke()
+        border.lineWidth = 1
+        border.stroke()
+        if field.stringValue.isEmpty {
+            drawMidLeft("Paste your key", nerdFont("Regular", 12), palette.muted,
+                        x: field.frame.minX + 6,
+                        midTop: bounds.height - field.frame.midY, height: bounds.height)
+        }
+        if !status.isEmpty {
+            drawTopLeft(status, nerdFont("Regular", 11), palette.muted,
+                        x: 0, top: 90, height: bounds.height)
+        }
+    }
+
+    // the key saves itself; a failed write is the only thing worth saying
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistKey() }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    @objc private func persistNow() { pendingSave?.cancel(); persistKey() }
+
+    private func persistKey() {
+        let value = field.stringValue.replacingOccurrences(of: "\n", with: "")
+        if writeSecret("wallhaven", value) {
+            field.stringValue = value
+            plainField.stringValue = value
+            status = ""
+        } else {
+            status = "Could not save the key"
+        }
+        needsDisplay = true
     }
 }
 
@@ -2418,6 +2788,9 @@ final class DashboardWindow: NSWindow {
     // fires for every left click the window receives, before dispatch. Used
     // to fold an expanded workspace row back on a click anywhere else.
     var onMouseDown: ((NSEvent) -> Void)?
+    // set while a system open panel is attached as a sheet: clicks in that
+    // window must not be mistaken for a click outside the dashboard
+    var hideSuppressed = false
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     override var canBecomeKey: Bool { true }
     override func sendEvent(_ event: NSEvent) {
@@ -2426,15 +2799,37 @@ final class DashboardWindow: NSWindow {
     }
 }
 
+protocol RefreshableTab: AnyObject {
+    func refreshColors()
+}
+
+extension OptionsTabView: RefreshableTab {}
+extension WorkspacesTabView: RefreshableTab {}
+extension ThemesTabView: RefreshableTab {}
+// --- wallpapers tab --------------------------------------------------------
+
+// wallhaven.cc browsing lands here (Phase 7): search row, chips and the
+// results grid. Local files are never previewed in this tab — they are
+// sourced from the Storage tab and appear as Wallpaper #N in Themes.
+final class WallpapersTabView: NSView {}
+
+extension StorageTabView: RefreshableTab {}
+extension APIKeysTabView: RefreshableTab {}
+extension UpdateTabView: RefreshableTab {}
+
 final class RootView: NSView {
-    let tabs = ["Options", "Workspaces", "Themes", "Update"]
+    let tabs = ["Options", "Workspaces", "Themes", "Wallpapers", "Storage", "API Keys", "Update"]
     var selected = 0
     private var logo: NSImage?
     private let logoView = NSImageView()
     private let options = OptionsTabView(frame: .zero)
     private let workspaces = WorkspacesTabView(frame: .zero)
     private let themes = ThemesTabView(frame: .zero)
+    private let wallpapers = WallpapersTabView(frame: .zero)
+    private let storage = StorageTabView(frame: .zero)
+    private let keys = APIKeysTabView(frame: .zero)
     private let update = UpdateTabView(frame: .zero)
+    private lazy var tabViews: [NSView] = [options, workspaces, themes, wallpapers, storage, keys, update]
     var onHide: (() -> Void)?
 
     private let logoH: CGFloat = 34
@@ -2460,10 +2855,7 @@ final class RootView: NSView {
     func paletteChanged() {
         palette = loadPalette()
         reloadLogo()
-        options.refreshColors()
-        workspaces.refreshColors()
-        themes.refreshColors()
-        update.refreshColors()
+        for v in tabViews { (v as? RefreshableTab)?.refreshColors() }
         needsDisplay = true
     }
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -2472,10 +2864,7 @@ final class RootView: NSView {
         logo = logoImage()
         logoView.image = logo
         needsDisplay = true
-        options.needsDisplay = true
-        workspaces.needsDisplay = true
-        themes.needsDisplay = true
-        update.needsDisplay = true
+        for v in tabViews { v.needsDisplay = true }
     }
 
     private var tabTop: CGFloat { topPad + logoH + 24 }
@@ -2498,13 +2887,13 @@ final class RootView: NSView {
 
     func showTab(_ i: Int) {
         selected = i
-        options.removeFromSuperview()
-        workspaces.removeFromSuperview()
-        themes.removeFromSuperview()
-        update.removeFromSuperview()
-        let v: NSView = i == 0 ? options : (i == 1 ? workspaces : (i == 2 ? themes : update))
+        for v in tabViews { v.removeFromSuperview() }
+        let v = tabViews[i]
         v.frame = contentFrame
         addSubview(v)
+        // a tab holding a text field may have made it first responder; the
+        // arrows and Esc have to keep reaching this view after a switch
+        window?.makeFirstResponder(self)
         needsDisplay = true
     }
 
@@ -2518,10 +2907,7 @@ final class RootView: NSView {
                                     y: bounds.height - (tabTop + logoH) / 2,
                                     width: w, height: logoH)
         }
-        options.frame = contentFrame
-        workspaces.frame = contentFrame
-        themes.frame = contentFrame
-        update.frame = contentFrame
+        for v in tabViews { v.frame = contentFrame }
     }
 
     private func tabFrame(_ i: Int) -> NSRect {
@@ -2584,9 +2970,7 @@ final class RootView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    private var activeTab: NSView {
-        selected == 0 ? options : (selected == 1 ? workspaces : (selected == 2 ? themes : update))
-    }
+    private var activeTab: NSView { tabViews[selected] }
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
@@ -2607,12 +2991,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: DashboardWindow?
     var root: RootView?
     var globalMonitor: Any?
+    var localKeyMonitor: Any?
     let width: CGFloat = 860
     let height: CGFloat = 720
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApplication.shared.mainMenu = NSMenu()
+        // An accessory app has no visible menu bar, but key equivalents are
+        // dispatched through the main menu: without an Edit menu, Cmd+V/C/X/A
+        // do nothing and only the field's context menu offers paste.
+        let main = NSMenu()
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        edit.addItem(NSMenuItem.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        NSApplication.shared.mainMenu = main
 
         let root = RootView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         root.onHide = { [weak self] in self?.hide() }
@@ -2665,15 +3065,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if globalMonitor == nil {
             globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-                self?.hide()
+                // an NSOpenPanel is a window from a system helper process, so
+                // its clicks reach this monitor as "another app"; while such a
+                // sheet is up, its clicks must not hide the dashboard
+                guard let self, self.window?.hideSuppressed != true else { return }
+                self.hide()
+            }
+        }
+        if localKeyMonitor == nil {
+            // Esc closes the dashboard even while a text field is editing,
+            // where the field editor swallows it before the responder chain.
+            // A local monitor sees the event first, like the picker's does.
+            localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
+                guard let self, self.window?.hideSuppressed != true else { return e }
+                // only Esc aimed at the dashboard: while the app picker is
+                // up it is the key window and handles its own Esc
+                if e.keyCode == 53, e.window === self.window { self.hide(); return nil }
+                return e
             }
         }
     }
 
     func hide() {
         AppPicker.dismiss()
+        window?.hideSuppressed = false
         window?.orderOut(nil)
         if let g = globalMonitor { NSEvent.removeMonitor(g); globalMonitor = nil }
+        if let k = localKeyMonitor { NSEvent.removeMonitor(k); localKeyMonitor = nil }
     }
 
     func toggle() {

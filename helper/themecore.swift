@@ -8,6 +8,7 @@
 //   omacosy-themecore color gradient <start> <end> [--steps N] [--json]
 //   omacosy-themecore color from-color <hex> [--json]
 //   omacosy-themecore color roundtrip <hex> [--json]     (test support)
+//   omacosy-themecore curve lut --points "x,y;x,y" [--json]
 //   omacosy-themecore presets [--json]
 //   omacosy-themecore modes [--json]
 //   omacosy-themecore theme list [--json]
@@ -30,6 +31,9 @@
 //   omacosy-themecore palette magic <image> [--roles] [--no-cache] [--json]
 //   omacosy-themecore palette roles --colors CSV [--accent HEX] [--json]
 //   omacosy-themecore palette roles --image PATH [--mode ID] [--light] [--json]
+//   omacosy-themecore palette render --colors CSV [--accent HEX] [--cursor HEX]
+//                                           [--selection-foreground HEX] [--selection-background HEX]
+//                                           [12 adjustment flags] [--curve "x,y;x,y"] [--json]
 //   omacosy-themecore palette suggest-mode <image> [--json]
 //   omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]   (test support)
 //   omacosy-themecore palette analyze <op> ...                                   (test support)
@@ -463,6 +467,170 @@ private func gammaApply(_ hsl: HSL, _ gamma: Double) -> String {
         r: min(255, max(0, pow(c.r / 255, inv) * 255)),
         g: min(255, max(0, pow(c.g / 255, inv) * 255)),
         b: min(255, max(0, pow(c.b / 255, inv) * 255))))
+}
+
+// MARK: - Tone curve
+
+// Ported from Aether (https://github.com/omacom/aether)
+// Copyright (c) Bjarne Overli — MIT License
+//
+// The monotone-cubic (Fritsch-Carlson) 256-entry LUT and its HSL-lightness
+// application, from frontend/src/lib/utils/canvas-filters.ts. Endpoints
+// (0,0) and (1,1) are implicit; an empty point list means "no curve".
+// notes/theme-studio-tests/record-curve-fixtures.sh pins the output against
+// Aether byte for byte.
+enum ToneCurve {
+    static let identity: [UInt8] = (0...255).map { UInt8($0) }
+
+    // 256-entry lightness LUT from user control points; nil when empty.
+    static func lut(_ points: [[Double]]) -> [UInt8]? {
+        guard !points.isEmpty else { return nil }
+
+        // JS Array.sort is stable; the original index breaks x ties the same way.
+        var tagged: [(i: Int, x: Double, y: Double)] = [(0, 0, 0)]
+        for (i, p) in points.enumerated() { tagged.append((i + 1, p[0], p[1])) }
+        tagged.append((points.count + 1, 1, 1))
+        tagged.sort { $0.x == $1.x ? $0.i < $1.i : $0.x < $1.x }
+        let pts = tagged.map { (x: $0.x, y: $0.y) }
+        let n = pts.count
+
+        var m: [Double] = []
+        for i in 0..<(n - 1) {
+            let dx = pts[i + 1].x - pts[i].x
+            let dy = pts[i + 1].y - pts[i].y
+            m.append(dx == 0 ? 0 : dy / dx)
+        }
+
+        var tangents = [Double](repeating: 0, count: n)
+        tangents[0] = m[0]
+        tangents[n - 1] = m[n - 2]
+        for i in 1..<(n - 1) {
+            if m[i - 1] * m[i] <= 0 {
+                tangents[i] = 0
+            } else {
+                tangents[i] = (m[i - 1] + m[i]) / 2
+            }
+        }
+
+        // Fritsch-Carlson monotonicity correction
+        for i in 0..<(n - 1) {
+            if m[i] == 0 {
+                tangents[i] = 0
+                tangents[i + 1] = 0
+            } else {
+                let a = tangents[i] / m[i]
+                let b = tangents[i + 1] / m[i]
+                let s = a * a + b * b
+                if s > 9 {
+                    let t = 3 / s.squareRoot()
+                    tangents[i] = t * a * m[i]
+                    tangents[i + 1] = t * b * m[i]
+                }
+            }
+        }
+
+        var lut = [UInt8](repeating: 0, count: 256)
+        var seg = 0
+        for i in 0..<256 {
+            let x = Double(i) / 255
+            while seg < n - 2 && x > pts[seg + 1].x { seg += 1 }
+            let p0 = pts[seg], p1 = pts[seg + 1]
+            let h = p1.x - p0.x
+            if h == 0 {
+                lut[i] = UInt8(max(0, min(255, (p0.y * 255).rounded())))
+                continue
+            }
+            let t = (x - p0.x) / h
+            let t2 = t * t, t3 = t2 * t
+            let h00 = 2 * t3 - 3 * t2 + 1
+            let h10 = t3 - 2 * t2 + t
+            let h01 = -2 * t3 + 3 * t2
+            let h11 = t3 - t2
+            let val = h00 * p0.y + h10 * h * tangents[seg]
+                + h01 * p1.y + h11 * h * tangents[seg + 1]
+            lut[i] = UInt8(max(0, min(255, (val * 255).rounded())))
+        }
+        return lut
+    }
+
+    // Aether's applyCurveToColors: the curve moves the HSL lightness only.
+    // The 0..1 HSL helpers mirror the JS exactly; ColorMath's degrees/percent
+    // round-trip would move a byte on the ties.
+    static func apply(_ hex: String, lut: [UInt8]) -> String {
+        guard lut.count == 256, hex.count >= 7 else { return hex }
+        let rgb = ColorMath.rgb(fromHex: hex)
+        let hsl = hsl01(rgb)
+        let index = min(255, max(0, Int((hsl.l * 255).rounded())))
+        let newL = Double(lut[index]) / 255
+        let out = rgb01(h: hsl.h, s: hsl.s, l: newL)
+        return ColorMath.hex(fromRGB: RGB(r: out.0 * 255, g: out.1 * 255, b: out.2 * 255))
+    }
+
+    private static func hsl01(_ rgb: RGB) -> (h: Double, s: Double, l: Double) {
+        let r = rgb.r / 255, g = rgb.g / 255, b = rgb.b / 255
+        let maxV = max(r, max(g, b)), minV = min(r, min(g, b))
+        let l = (maxV + minV) / 2
+        var h = 0.0, s = 0.0
+        if maxV != minV {
+            let d = maxV - minV
+            s = l > 0.5 ? d / (2 - maxV - minV) : d / (maxV + minV)
+            if maxV == r {
+                h = ((g - b) / d + (g < b ? 6.0 : 0.0)) / 6
+            } else if maxV == g {
+                h = ((b - r) / d + 2) / 6
+            } else {
+                h = ((r - g) / d + 4) / 6
+            }
+        }
+        return (h, s, l)
+    }
+
+    private static func rgb01(h: Double, s: Double, l: Double) -> (Double, Double, Double) {
+        if s == 0 { return (l, l, l) }
+        let q = l < 0.5 ? l * (1 + s) : l + s - l * s
+        let p = 2 * l - q
+        return (hue2rgb(p, q, h + 1.0 / 3.0), hue2rgb(p, q, h), hue2rgb(p, q, h - 1.0 / 3.0))
+    }
+
+    private static func hue2rgb(_ p: Double, _ q: Double, _ t0: Double) -> Double {
+        var t = t0
+        if t < 0 { t += 1 }
+        if t > 1 { t -= 1 }
+        if t < 1.0 / 6.0 { return p + (q - p) * 6 * t }
+        if t < 1.0 / 2.0 { return q }
+        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6 }
+        return p
+    }
+}
+
+extension Adjustments {
+    // True when the recipe changes nothing: materialise and the editor then
+    // keep the base colours byte for byte.
+    var isIdentity: Bool {
+        vibrance == 0 && saturation == 0 && contrast == 0 && brightness == 0
+            && shadows == 0 && highlights == 0 && hueShift == 0 && temperature == 0
+            && tint == 0 && blackPoint == 0 && whitePoint == 0 && gamma == 1.0
+    }
+}
+
+extension Palette16 {
+    // The final palette the desktop shows: the stored base colours with the
+    // 12 adjustments and then the tone curve applied (Aether's order). The
+    // extended four go through the same chain, so the bar accent and the
+    // cursor colour stay in step with the 16.
+    func rendered() -> (colors: [String], extended: Extended) {
+        let a = adjustments
+        let lut = ToneCurve.lut(curve)
+        func one(_ hex: String) -> String {
+            let adjusted = a.isIdentity ? hex : adjustColor(hex, a)
+            return lut.map { ToneCurve.apply(adjusted, lut: $0) } ?? adjusted
+        }
+        return (colors.map(one),
+                Extended(accent: one(extended.accent),
+                         cursor: one(extended.cursor),
+                         selectionForeground: one(extended.selectionForeground),
+                         selectionBackground: one(extended.selectionBackground)))
+    }
 }
 
 // MARK: - Presets
@@ -3885,6 +4053,38 @@ struct ThemeLibrary {
         }
     }
 
+    // The edition's own image copy, captured at first save: content-addressed
+    // (<sha256-16>.<ext>) so several editions of one wallpaper share a file,
+    // and a rename, move or deletion of the source cannot break them. An
+    // existing destination is already the same bytes; nothing is written.
+    func captureMedia(from path: String) throws -> String {
+        let url = URL(fileURLWithPath: path)
+        guard let data = FileManager.default.contents(atPath: url.path) else {
+            throw ThemeError(message: "cannot read \(url.path)")
+        }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        var ext = url.pathExtension.lowercased().filter { $0.isLetter || $0.isNumber }
+        if ext.isEmpty { ext = "img" }
+        let name = String(digest.prefix(16)) + "." + ext
+        let dest = mediaDir.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: dest.path) { return name }
+        do { try FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true) }
+        catch { throw ThemeError(message: "cannot create \(mediaDir.path): \(error.localizedDescription)") }
+        let tmp = mediaDir.appendingPathComponent(".\(name).tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        do {
+            try data.write(to: tmp)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try? FileManager.default.removeItem(at: tmp)   // lost a race
+            } else {
+                try FileManager.default.moveItem(at: tmp, to: dest)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw ThemeError(message: "cannot capture \(url.path): \(error.localizedDescription)")
+        }
+        return name
+    }
+
     // Materialised directories are disposable and named <id>-<rev>; deleting
     // the record makes them orphans, so they go with it. Best effort.
     func removeMaterialised(id: String) {
@@ -3927,9 +4127,9 @@ enum Materialise {
     }
 
     // The plan's revision hash: palette, extended colours, resolved mode (it
-    // picks the semantic trio), media, blur, edited flag and the app
-    // overrides. `name` is deliberately absent: renaming an edition must not
-    // repaint the desktop.
+    // picks the semantic trio), the adjustments and curve (the render
+    // recipe), media, blur, edited flag and the app overrides. `name` is
+    // deliberately absent: renaming an edition must not repaint the desktop.
     static func revision(of theme: Theme) -> String {
         var parts: [String] = []
         parts.append(theme.palette.colors.joined(separator: ","))
@@ -3937,6 +4137,11 @@ enum Materialise {
         parts.append([ext.accent, ext.cursor, ext.selectionForeground, ext.selectionBackground]
             .joined(separator: ","))
         parts.append(theme.palette.resolvedMode)
+        let a = theme.palette.adjustments
+        parts.append([a.vibrance, a.saturation, a.contrast, a.brightness, a.shadows,
+                      a.highlights, a.hueShift, a.temperature, a.tint, a.blackPoint,
+                      a.whitePoint, a.gamma].map { "\($0)" }.joined(separator: ","))
+        parts.append(theme.palette.curve.map { "\($0[0]),\($0[1])" }.joined(separator: ";"))
         parts.append(theme.wallpaper.media ?? "")
         parts.append(theme.wallpaper.blur ? "1" : "0")
         parts.append(theme.wallpaper.edited ? "1" : "0")
@@ -3994,7 +4199,10 @@ enum Materialise {
     }
 
     static func writeArtifacts(_ theme: Theme, image: URL, to dir: URL) throws {
-        let roles = barRoles(theme.palette.colors, accent: theme.palette.extended.accent)
+        // The stored colours are the base palette; the desktop sees them with
+        // the 12 adjustments and the curve applied (the record's recipe).
+        let rendered = theme.palette.rendered()
+        let roles = barRoles(rendered.colors, accent: rendered.extended.accent)
         let sem = theme.palette.resolvedMode == "light" ? semanticLight : semanticDark
 
         var sb = "#!/usr/bin/env bash\n"
@@ -4013,15 +4221,15 @@ enum Materialise {
         bd += "export ACTIVE_COLOR=\(argb(roles.ring))\n"
         bd += "export INACTIVE_COLOR=\(argb(roles.pill))\n"
 
-        let ext = theme.palette.extended
+        let ext = rendered.extended
         var toml = ""
         toml += "accent = \"\(ext.accent)\"\n"
         toml += "cursor = \"\(ext.cursor)\"\n"
-        toml += "foreground = \"\(theme.palette.colors[7])\"\n"
-        toml += "background = \"\(theme.palette.colors[0])\"\n"
+        toml += "foreground = \"\(rendered.colors[7])\"\n"
+        toml += "background = \"\(rendered.colors[0])\"\n"
         toml += "selection_foreground = \"\(ext.selectionForeground)\"\n"
         toml += "selection_background = \"\(ext.selectionBackground)\"\n"
-        for i in 0..<16 { toml += "color\(i) = \"\(theme.palette.colors[i])\"\n" }
+        for i in 0..<16 { toml += "color\(i) = \"\(rendered.colors[i])\"\n" }
 
         try sb.write(to: dir.appendingPathComponent("sketchybar.sh"), atomically: true, encoding: .utf8)
         try bd.write(to: dir.appendingPathComponent("borders.sh"), atomically: true, encoding: .utf8)
@@ -4390,7 +4598,7 @@ func themeError(_ error: Error) -> Never {
 
 // MARK: - CLI
 
-let themecoreVersion = "0.5.0"
+let themecoreVersion = "0.6.0"
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write("omacosy-themecore: \(message)\n".data(using: .utf8)!)
@@ -4413,6 +4621,7 @@ func usage() -> Never {
            omacosy-themecore color lighten <hex> <percent> [--json]
            omacosy-themecore color gradient <start> <end> [--steps N] [--json]
            omacosy-themecore color from-color <hex> [--json]
+           omacosy-themecore curve lut --points "x,y;x,y" [--json]
            omacosy-themecore presets [--json]
            omacosy-themecore modes [--json]
            omacosy-themecore theme list [--json]
@@ -4436,6 +4645,9 @@ func usage() -> Never {
            omacosy-themecore palette magic <image> [--roles] [--no-cache] [--json]
            omacosy-themecore palette roles --colors CSV [--accent HEX] [--json]
            omacosy-themecore palette roles --image PATH [--mode ID] [--light] [--json]
+           omacosy-themecore palette render --colors CSV [--accent HEX] [--cursor HEX]
+                                           [--selection-foreground HEX] [--selection-background HEX]
+                                           [12 adjustment flags] [--curve "x,y;x,y"] [--json]
            omacosy-themecore palette suggest-mode <image> [--json]
            omacosy-themecore palette quantize --pixels-file PATH [--count N] [--json]
            omacosy-themecore palette analyze <op> ...
@@ -4518,6 +4730,44 @@ func doubleListArgument(_ raw: String) -> [Double] {
     }
 }
 
+// The 12 adjustment flags, shared by `color adjust` and `palette render`.
+func takeAdjustments() -> Adjustments {
+    var a = Adjustments()
+    if let v = takeNumber("--vibrance") { a.vibrance = v }
+    if let v = takeNumber("--saturation") { a.saturation = v }
+    if let v = takeNumber("--contrast") { a.contrast = v }
+    if let v = takeNumber("--brightness") { a.brightness = v }
+    if let v = takeNumber("--shadows") { a.shadows = v }
+    if let v = takeNumber("--highlights") { a.highlights = v }
+    if let v = takeNumber("--hue-shift") { a.hueShift = v }
+    if let v = takeNumber("--temperature") { a.temperature = v }
+    if let v = takeNumber("--tint") { a.tint = v }
+    if let v = takeNumber("--black-point") { a.blackPoint = v }
+    if let v = takeNumber("--white-point") { a.whitePoint = v }
+    if let v = takeNumber("--gamma") { a.gamma = v }
+    return a
+}
+
+// "x,y;x,y"; empty means no curve. Same validation as the record parser:
+// values inside 0...1, x strictly increasing.
+func curvePointsArgument(_ raw: String) -> [[Double]] {
+    let trimmed = raw.trimmingCharacters(in: .whitespaces)
+    if trimmed.isEmpty { return [] }
+    var out: [[Double]] = []
+    for pair in trimmed.split(separator: ";") {
+        let parts = pair.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]),
+              x >= 0, x <= 1, y >= 0, y <= 1 else {
+            fail("--curve must be \"x,y;x,y\" with values inside 0...1")
+        }
+        if let last = out.last, x <= last[0] {
+            fail("--curve x values must strictly increase")
+        }
+        out.append([x, y])
+    }
+    return out
+}
+
 func noExtraArguments() {
     if !args.isEmpty { usage() }
 }
@@ -4586,19 +4836,7 @@ case "color":
         exit(0)
 
     case "adjust":
-        var a = Adjustments()
-        if let v = takeNumber("--vibrance") { a.vibrance = v }
-        if let v = takeNumber("--saturation") { a.saturation = v }
-        if let v = takeNumber("--contrast") { a.contrast = v }
-        if let v = takeNumber("--brightness") { a.brightness = v }
-        if let v = takeNumber("--shadows") { a.shadows = v }
-        if let v = takeNumber("--highlights") { a.highlights = v }
-        if let v = takeNumber("--hue-shift") { a.hueShift = v }
-        if let v = takeNumber("--temperature") { a.temperature = v }
-        if let v = takeNumber("--tint") { a.tint = v }
-        if let v = takeNumber("--black-point") { a.blackPoint = v }
-        if let v = takeNumber("--white-point") { a.whitePoint = v }
-        if let v = takeNumber("--gamma") { a.gamma = v }
+        let a = takeAdjustments()
         let hex = hexArgument("hex")
         noExtraArguments()
         let out = adjustColor(hex, a)
@@ -4651,6 +4889,23 @@ case "color":
         let hslHex = ColorMath.hex(fromHSL: ColorMath.hsl(fromHex: hex))
         if jsonOut { printJSON(["input": hex, "oklab": oklabHex, "oklch": oklchHex, "hsl": hslHex]) }
         print(oklabHex); print(oklchHex); print(hslHex)
+        exit(0)
+
+    default:
+        usage()
+    }
+
+case "curve":
+    guard let sub = args.first else { usage() }
+    args.removeFirst()
+
+    switch sub {
+    case "lut":
+        let points = curvePointsArgument(takeFlag("--points") ?? "")
+        noExtraArguments()
+        let lut = ToneCurve.lut(points) ?? ToneCurve.identity
+        if jsonOut { printJSON(["lut": lut.map { Int($0) }]) }
+        lut.forEach { print($0) }
         exit(0)
 
     default:
@@ -4827,6 +5082,15 @@ case "theme":
                 top["id"] = slugify(name)
             }
             var theme = try Theme.parse(top, label: label)
+            // First save captures the source into the edition's own image
+            // store (content-addressed, shared between editions). A source
+            // that no longer exists is left alone; an unreadable one fails.
+            if theme.wallpaper.media == nil, let path = theme.wallpaper.path, !path.isEmpty {
+                let resolved = Wallpapers.resolved(path)
+                if FileManager.default.fileExists(atPath: resolved) {
+                    theme.wallpaper.media = try library.captureMedia(from: resolved)
+                }
+            }
             let exists = library.exists(id: theme.id)
             if exists && !hadID && !replace {
                 throw ThemeError(message: "theme \"\(theme.id)\" already exists — pass --replace to overwrite it, or --name to save under another name")
@@ -5304,6 +5568,43 @@ case "palette":
             print(mode)
             exit(0)
         } catch { themeError(error) }
+
+    case "render":
+        guard let colorsRaw = takeFlag("--colors") else {
+            fail("palette render needs --colors (#rrggbb,#rrggbb,...)")
+        }
+        let colors = hexListArgument(colorsRaw)
+        guard colors.count == 16 else { fail("palette render needs exactly 16 colours") }
+        var extended = Extended.defaults(for: colors)
+        if let v = takeFlag("--accent") { extended.accent = normalizedHex(v) }
+        if let v = takeFlag("--cursor") { extended.cursor = normalizedHex(v) }
+        if let v = takeFlag("--selection-foreground") {
+            extended.selectionForeground = normalizedHex(v)
+        }
+        if let v = takeFlag("--selection-background") {
+            extended.selectionBackground = normalizedHex(v)
+        }
+        let adjustments = takeAdjustments()
+        let curve = curvePointsArgument(takeFlag("--curve") ?? "")
+        noExtraArguments()
+        let palette = Palette16(method: "render", colors: colors, extended: extended,
+                                adjustments: adjustments, curve: curve)
+        let out = palette.rendered()
+        if jsonOut {
+            printJSON([
+                "colors": out.colors,
+                "extended": ["accent": out.extended.accent,
+                             "cursor": out.extended.cursor,
+                             "selection_foreground": out.extended.selectionForeground,
+                             "selection_background": out.extended.selectionBackground],
+            ])
+        }
+        out.colors.forEach { print($0) }
+        print(out.extended.accent)
+        print(out.extended.cursor)
+        print(out.extended.selectionForeground)
+        print(out.extended.selectionBackground)
+        exit(0)
 
     case "generate":
         guard let colorsRaw = takeFlag("--colors") else {

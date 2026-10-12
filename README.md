@@ -571,9 +571,10 @@ falling through to the window beneath. Per-app opt-out lives in
 
 4-finger swipes left/right switch workspaces on the display under the
 cursor (native-Spaces semantics), with wrap-around, on any trackpad.
-The system's own 4-finger gestures are disabled by `macos-defaults.sh`
-so Mission Control never fights the daemon; `uninstall.sh` and
-`omacosy-toggle off` restore them.
+The system's own trackpad swipes (both the three- and four-finger
+gestures) are disabled by `macos-defaults.sh` so Mission Control never
+fights the daemon; `uninstall.sh` and `omacosy-toggle off` restore them
+(macOS may need a log out/in before a trackpad gesture re-arms).
 
 ## Workspace overview
 

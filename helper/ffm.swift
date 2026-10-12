@@ -206,6 +206,18 @@ func windowCandidates() -> [Cand] {
         // both dimensions: the 702x1027 shape above is narrower than the
         // 718x883 Safari it covers (702 < 718) but larger overall.
         //
+        // Being larger still is not enough on its own, because "larger"
+        // is trivially true for anything over a small enough window. A
+        // Raycast panel (750x474) over a 400x300 floating window covers
+        // it fully and is larger, so it would be dropped as a decoration
+        // and hover would steal focus from the panel. A real decoration
+        // is inflated around its window by a fixed margin, so it is
+        // larger by a bounded factor, not an arbitrary one: the two
+        // shapes measured above are 1.6x and 1.14x the window they
+        // cover, while that panel is 2.96x. So 2x by area separates a
+        // decoration from a panel that merely happens to be bigger than
+        // the small window under it.
+        //
         // Same-app is deliberately excluded: an app drawing a shade over
         // its own window is doing it on purpose, and blocking is right.
         if blocking, screens.contains(where: { scr in
@@ -217,6 +229,7 @@ func windowCandidates() -> [Cand] {
             let i = rect.intersection($0.rect)
             return !i.isNull && i.width * i.height >= $0.rect.width * $0.rect.height * 0.7
                 && rect.width * rect.height > $0.rect.width * $0.rect.height
+                && rect.width * rect.height <= $0.rect.width * $0.rect.height * 2
         }) { continue }
         // AeroSpace hides inactive-workspace windows mostly offscreen
         // with a sliver visible — ignore anything <30% on-screen

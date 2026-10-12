@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Back to a normal Mac. Best-effort teardown: stops the tiling stack,
 # restores the native menu bar, unlinks configs (restoring backups
-# where install.sh made them). Homebrew packages are left installed.
+# where install.sh made them). Homebrew packages the manifest records
+# are removed, except the ones you choose to keep.
 
 set -uo pipefail
 
@@ -304,7 +305,11 @@ pick_keep() { # <label>... ; sets KEEP_IDX to the indexes kept
         ans=""
         # asked on the terminal too, so it stays out of an output file
         printf 'Continue? [y/N, n goes back to the list] ' >/dev/tty
-        IFS= read -r ans </dev/tty || ans=y
+        IFS= read -r ans </dev/tty || ans=n
+        # Ctrl-C here must not count as "yes": the trap set quit, so keep
+        # everything and carry on. A failed read with no Ctrl-C is EOF
+        # (Ctrl-D) = "no", which falls through to redraw the list.
+        [ "$quit" = 1 ] && break
         case "$ans" in
           [yY]*) KEEP_IDX=""
                  for ((i = 0; i < n; i++)); do [ "${sel[i]}" = 1 ] && KEEP_IDX="$KEEP_IDX $i "; done

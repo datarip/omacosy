@@ -326,8 +326,17 @@ case "$BAR_HEIGHT" in
   ''|*[!0-9]*) ;;                         # no helper yet: keep the shipped fallback
   *)
     # No external display has a notch, so its gap is the inset-0 case: the
-    # bar's whole height plus the margin.
+    # bar's whole height plus the margin. The external's bar is as tall as
+    # ITS strip, which menuBarHeight cannot answer (it follows the main
+    # display, and a notched built-in's strip is taller); ask the helper
+    # for the external's own and fall back to the main one when no
+    # external is up to be asked.
     OUTER_TOP_EXT=$(( BAR_HEIGHT + BAR_MARGIN ))
+    BAR_HEIGHT_EXT="$("$HOME/.local/bin/omacosy-helper" bar-height-external 2>/dev/null || true)"
+    case "$BAR_HEIGHT_EXT" in
+      ''|*[!0-9]*) ;;                     # no external up: the main height stands
+      *) OUTER_TOP_EXT=$(( BAR_HEIGHT_EXT + BAR_MARGIN )) ;;
+    esac
     OUTER_TOP=$OUTER_TOP_EXT
     INSET="$("$HOME/.local/bin/omacosy-helper" safe-top 2>/dev/null || true)"
     case "$INSET" in

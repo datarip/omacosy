@@ -11,6 +11,10 @@
 //   bar-height              the height macOS draws the menu bar at, in
 //                           points; install.sh reserves room for the bar
 //                           from it
+//   bar-height-external     the EXTERNAL display's own menu-bar height —
+//                           bar-height follows the main display only, and
+//                           a notched built-in's strip is taller; fails
+//                           with no external up
 //   safe-top                the built-in display's notch inset in points
 //                           (0 = no notch); install.sh sizes the top gap
 //                           from it
@@ -204,6 +208,49 @@ case "bar-height":
     if NSApplication.shared.mainMenu == nil { NSApplication.shared.mainMenu = NSMenu() }
     guard let h = NSApplication.shared.mainMenu?.menuBarHeight, h > 0 else { exit(1) }
     print(Int(h.rounded()))
+
+case "bar-height-external":
+    // The same question for the EXTERNAL display, which has its own answer:
+    // the read above reports only the MAIN display's strip, and a notched
+    // built-in's strip is taller than any external's. install.sh sizes the
+    // external monitor's top gap with this, so the gap follows the bar the
+    // external actually draws. The Window Server keeps one Menubar window
+    // per display at that display's strip height, listed even while the
+    // bar is auto-hidden (slid just off the top edge); match one to the
+    // external screen by x/width and its edge at the display top. Prints
+    // nothing and fails when no external is up, which is install.sh's
+    // signal to keep the main-display value. The window NAME is not used:
+    // kCGWindowName needs Screen Recording; the strip's layer plus one of
+    // its two known owners is enough to pick it out.
+    let builtin = builtinDisplayID()
+    guard let ext = NSScreen.screens.first(where: {
+        (($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            ?? 0) != builtin
+    }) else { exit(1) }
+    let primaryH = NSScreen.screens.first?.frame.height ?? 0
+    let topY = primaryH - ext.frame.maxY
+    let menuLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
+    let list = (CGWindowListCopyWindowInfo([], kCGNullWindowID) as? [[String: Any]]) ?? []
+    var agentHeight: CGFloat = 0
+    for w in list {
+        guard (w[kCGWindowLayer as String] as? Int) == menuLevel,
+              let owner = w[kCGWindowOwnerName as String] as? String,
+              owner == "Window Server" || owner == "MenuBarAgent",
+              let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = b["X"], let y = b["Y"], let width = b["Width"],
+              let height = b["Height"], height > 0,
+              height < ext.frame.height / 4
+        else { continue }
+        // the strip touches the display's top edge whether auto-hidden
+        // (slid just above it), shown (just below), or mid-slide
+        if abs(x - ext.frame.minX) < 2, abs(width - ext.frame.width) < 2,
+           y <= topY + 2, y + height >= topY - 2 {
+            if owner == "Window Server" { print(Int(height.rounded())); exit(0) }
+            if agentHeight == 0 { agentHeight = height }
+        }
+    }
+    if agentHeight > 0 { print(Int(agentHeight.rounded())); exit(0) }
+    exit(1)
 
 case "safe-top":
     // A notched display reports usable space starting below the camera

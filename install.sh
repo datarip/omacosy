@@ -373,7 +373,61 @@ if [ -f "$HOME/.config/karabiner/karabiner.json" ] \
   cp "$HOME/.config/karabiner/karabiner.json" "$HOME/.config/karabiner/karabiner.json.bak.omacosy"
   mark "had-karabiner-config"
 fi
+# The seed replaces the file, but the per-device switches are the user's:
+# a keyboard that is also a pointing device (Hall-effect and Bluetooth
+# boards often are) is left unmodified until "Modify events" is turned on
+# for it, and that switch is a `devices` entry naming its vendor and
+# product — no generic entry matches it. Carry those entries over.
+KB_DEVICES=""
+if [ -f "$HOME/.config/karabiner/karabiner.json" ]; then
+  KB_DEVICES="$(python3 - "$HOME/.config/karabiner/karabiner.json" <<'PY' 2>/dev/null || true
+import json, sys
+c = json.load(open(sys.argv[1]))
+p = next((p for p in c.get("profiles", []) if p.get("selected")), None)
+print(json.dumps(p.get("devices", []) if p else []))
+PY
+)"
+fi
 cp "$REPO_DIR/config/karabiner/karabiner.json" "$HOME/.config/karabiner/karabiner.json"
+if [ -n "$KB_DEVICES" ] && [ "$KB_DEVICES" != "[]" ]; then
+  python3 - "$HOME/.config/karabiner/karabiner.json" "$KB_DEVICES" <<'PY' \
+    || log "WARNING: could not carry your Karabiner device settings over"
+import json, sys
+f, kept = sys.argv[1], json.loads(sys.argv[2])
+c = json.load(open(f))
+p = next(p for p in c["profiles"] if p.get("selected"))
+devs = p.setdefault("devices", [])
+seen = [d.get("identifiers") for d in devs]
+devs += [d for d in kept if d.get("identifiers") not in seen]  # the seed's own entries win
+json.dump(c, open(f, "w"), indent=4)
+PY
+fi
+# Name any connected keyboard Karabiner will leave alone, so a new board
+# whose Caps Lock does nothing is a one-switch fix rather than a mystery.
+# Not switched on here: mice that also present a keyboard (Logitech's,
+# for one) match the same test, and routing them through Karabiner is
+# the user's call.
+KB_CLI="/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli"
+if [ -x "$KB_CLI" ]; then
+  "$KB_CLI" --list-connected-devices 2>/dev/null | python3 -c '
+import json, sys
+devs = json.load(sys.stdin)
+cfg = json.load(open(sys.argv[1]))
+p = next(p for p in cfg["profiles"] if p.get("selected"))
+on = [d.get("identifiers", {}) for d in p.get("devices", []) if d.get("ignore") is False]
+for d in devs:
+    i = d.get("device_identifiers", {})
+    if not (i.get("is_keyboard") and i.get("is_pointing_device")) or i.get("is_built_in_keyboard"):
+        continue
+    if any(o.get("vendor_id") == i.get("vendor_id") and o.get("product_id") == i.get("product_id") for o in on):
+        continue
+    print(d.get("product") or "an unnamed device")
+' "$HOME/.config/karabiner/karabiner.json" 2>/dev/null | while IFS= read -r name; do
+    log "NOTE: Karabiner leaves \"$name\" unmodified (it is also a pointing device), so"
+    log "  Caps Lock is no Super key there. If it is a keyboard: Karabiner-Elements >"
+    log "  Settings > Devices > turn on Modify events for it. Re-runs keep that switch."
+  done
+fi
 launchctl kickstart -k "gui/$(id -u)/org.pqrs.service.agent.Karabiner-Console-User-Server" 2>/dev/null || true
 # the copy above reset the file to the seed, which has only the Caps Lock
 # rule: every chord that RUNS something (terminal, launcher, theme, lock)

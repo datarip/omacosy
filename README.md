@@ -367,6 +367,12 @@ Karabiner remaps Caps Lock to `cmd+ctrl+alt` (a combo macOS never
 uses), so omarchy's scheme works letter-for-letter without breaking
 typing or app shortcuts. Caps Lock tapped alone is Escape.
 
+A new keyboard whose Caps Lock still toggles caps: Karabiner leaves a
+device alone when it also reports as a pointing device, which many
+Hall-effect and Bluetooth boards do. Turn on **Modify events** for it in
+Karabiner-Elements → Settings → Devices. `install.sh` keeps that switch
+on re-runs and names such keyboards when it finds one connected.
+
 | Chord | Action |
 |---|---|
 | **Navigation** | |

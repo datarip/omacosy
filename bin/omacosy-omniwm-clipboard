@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# omacosy-omniwm-clipboard — keep OmniWM's clipboard history in step with
+# the chosen launcher.
+#
+#   omacosy-omniwm-clipboard status          setting, resolved launcher and live value
+#   omacosy-omniwm-clipboard apply           write the policy to OmniWM
+#   omacosy-omniwm-clipboard delete [--yes]  remove OmniWM's clipboard history
+#
+# OMNIWM_CLIPBOARD=on|off|follow-launcher (default follow-launcher):
+#   on              force [clipboard] historyEnabled = true
+#   off             force false
+#   follow-launcher false when the chosen launcher is not OmniWM; when
+#                   OmniWM is the chosen launcher the user's setting is left
+#                   alone. It never re-enables history by itself.
+#
+# OmniWM watches settings.toml and live-reloads it; no restart is needed.
+# Turning history off does NOT delete the old clipboard-history.json.
+set -u
+
+APPS="$HOME/.config/omacosy/apps.conf"
+SETTINGS="$HOME/.config/omniwm/settings.toml"
+HISTORY="$HOME/.local/state/omniwm/clipboard-history.json"
+BIN="$HOME/.local/bin"
+
+value="follow-launcher"
+launcher="auto"
+[ -f "$APPS" ] && . "$APPS" 2>/dev/null
+value="${OMNIWM_CLIPBOARD:-follow-launcher}"
+launcher="${LAUNCHER:-auto}"
+
+case "$value" in
+  on | off | follow-launcher) ;;
+  *)
+    echo "omacosy-omniwm-clipboard: OMNIWM_CLIPBOARD must be on, off or follow-launcher" >&2
+    exit 2
+    ;;
+esac
+
+history_value() {
+  [ -f "$SETTINGS" ] || { printf 'missing'; return; }
+  awk '
+    /^[[:space:]]*\[clipboard\]/ { in_section=1; next }
+    /^[[:space:]]*\[/ { in_section=0 }
+    in_section && /^[[:space:]]*historyEnabled[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      print
+      exit
+    }
+  ' "$SETTINGS"
+}
+
+resolved_launcher() {
+  local json=""
+  # install.sh knows which manager it is installing, even before OmniWM
+  # has answered its socket.
+  if [ "$launcher" = auto ]; then
+    case "${OMACOSY_WM:-}" in
+      omniwm) printf 'omniwm'; return ;;
+      aerospace) printf 'raycast'; return ;;
+    esac
+  fi
+  if [ -x "$BIN/omacosy-launcher" ]; then
+    json="$("$BIN/omacosy-launcher" status --json 2>/dev/null || true)"
+    case "$json" in
+      *'"resolved":"omniwm"'*) printf 'omniwm'; return ;;
+      *'"resolved":"raycast"'*) printf 'raycast'; return ;;
+      *'"resolved":"tinycast"'*) printf 'tinycast'; return ;;
+      *'"resolved":"alfred"'*) printf 'alfred'; return ;;
+      *'"resolved":"none"'*) printf 'none'; return ;;
+    esac
+  fi
+  case "$launcher" in
+    auto)
+      if [ -x "$BIN/omacosy-omni" ] && "$BIN/omacosy-omni" active >/dev/null 2>&1; then
+        printf 'omniwm'
+      else
+        printf 'raycast'
+      fi
+      ;;
+    *) printf '%s' "$launcher" ;;
+  esac
+}
+
+write_history() {
+  local desired=$1
+  [ -f "$SETTINGS" ] || {
+    echo "omacosy-omniwm-clipboard: no $SETTINGS to update" >&2
+    return 1
+  }
+  python3 - "$SETTINGS" "$desired" <<'PY'
+import re, sys
+
+path, desired = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.readlines()
+
+out = []
+in_clipboard = False
+found_section = False
+found_key = False
+
+for line in lines:
+    if re.match(r'^\s*\[clipboard\]\s*(#.*)?$', line):
+        in_clipboard = True
+        found_section = True
+        out.append(line)
+        continue
+    if in_clipboard and re.match(r'^\s*\[', line):
+        if not found_key:
+            out.append(f"historyEnabled = {desired}\n")
+            found_key = True
+        in_clipboard = False
+        out.append(line)
+        continue
+    if in_clipboard and re.match(r'^\s*historyEnabled\s*=', line):
+        out.append(re.sub(r'^(\s*historyEnabled\s*=\s*)\S+', rf'\g<1>{desired}', line))
+        found_key = True
+        continue
+    out.append(line)
+
+if found_section and in_clipboard and not found_key:
+    out.append(f"historyEnabled = {desired}\n")
+elif not found_section:
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    out.append(f"\n[clipboard]\nhistoryEnabled = {desired}\n")
+
+with open(path, "w") as f:
+    f.writelines(out)
+PY
+}
+
+case "${1:-}" in
+  status)
+    resolved="$(resolved_launcher)"
+    printf 'omniwm clipboard: setting=%s launcher=%s resolved=%s historyEnabled=%s\n' \
+      "$value" "$launcher" "$resolved" "$(history_value)"
+    printf 'settings: %s\n' "$SETTINGS"
+    ;;
+  apply)
+    resolved="$(resolved_launcher)"
+    case "$value" in
+      on) desired=true ;;
+      off) desired=false ;;
+      follow-launcher)
+        if [ "$resolved" = omniwm ]; then
+          printf 'omniwm clipboard: OmniWM is the launcher; history left as-is (%s)\n' "$(history_value)"
+          exit 0
+        fi
+        desired=false
+        ;;
+    esac
+    current="$(history_value)"
+    if [ "$current" = "$desired" ]; then
+      printf 'omniwm clipboard: historyEnabled already %s\n' "$desired"
+      exit 0
+    fi
+    write_history "$desired" || exit 1
+    printf 'omniwm clipboard: historyEnabled = %s\n' "$desired"
+    ;;
+  delete)
+    if [ "${2:-}" != --yes ]; then
+      printf 'Delete %s? [y/N] ' "$HISTORY"
+      read -r answer || exit 1
+      case "$answer" in y | Y | yes | YES) ;; *) echo "kept"; exit 0 ;; esac
+    fi
+    if [ ! -e "$HISTORY" ]; then
+      echo "omacosy-omniwm-clipboard: no history at $HISTORY"
+      exit 0
+    fi
+    rm -f "$HISTORY" "$HISTORY-wal" "$HISTORY-shm" "$HISTORY.tmp"
+    echo "omacosy-omniwm-clipboard: removed $HISTORY"
+    ;;
+  -h | --help | help)
+    sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo 'usage: omacosy-omniwm-clipboard status | apply | delete [--yes]' >&2
+    exit 2
+    ;;
+esac

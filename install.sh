@@ -129,6 +129,13 @@ read_apps() {
       esac
       continue
     fi
+    if [ "$k" = OMNIWM_CLIPBOARD ]; then
+      case "$v" in
+        on | off | follow-launcher) OMNIWM_CLIPBOARD="$v" ;;
+        *) log "ignoring OMNIWM_CLIPBOARD in $(basename "$f"): expected on, off or follow-launcher" ;;
+      esac
+      continue
+    fi
     case "$v" in
       ''|*[!A-Za-z0-9\ ._-]*)
         log "ignoring $k in $(basename "$f"): an app name cannot contain '$v'"
@@ -148,7 +155,7 @@ read_apps() {
 # deliberately left unset there, so those chords follow the macOS default
 # web browser and mail app (see bin/omacosy-browser, bin/omacosy-open)
 # until you name one.
-TERMINAL= BROWSER= EMAIL= MUSIC= MESSENGER= LAUNCHER=auto
+TERMINAL= BROWSER= EMAIL= MUSIC= MESSENGER= LAUNCHER=auto OMNIWM_CLIPBOARD=follow-launcher
 read_apps "$REPO_DIR/config/apps.conf"
 read_apps "$REPO_DIR/config/apps.local.conf"
 # An explicit flag wins. Otherwise a re-run keeps apps.local.conf's value,
@@ -158,6 +165,11 @@ case "$LAUNCHER" in
   auto | raycast | tinycast | alfred | omniwm | none) ;;
   *) log "ignoring LAUNCHER=$LAUNCHER: expected auto, raycast, tinycast, alfred, omniwm or none"
      LAUNCHER=auto ;;
+esac
+case "$OMNIWM_CLIPBOARD" in
+  on | off | follow-launcher) ;;
+  *) log "ignoring OMNIWM_CLIPBOARD=$OMNIWM_CLIPBOARD: expected on, off or follow-launcher"
+     OMNIWM_CLIPBOARD=follow-launcher ;;
 esac
 # OmniWM's launcher talks to OmniWM over IPC, so it is the one value that
 # only works under OmniWM. An explicit contradictory flag is an error; a
@@ -183,8 +195,8 @@ fi
 # the bar's activity pill reads this file too and cannot read the repo from
 # a launchd agent when the clone is TCC-protected.
 mkdir -p "$HOME/.config/omacosy"
-printf 'TERMINAL="%s"\nBROWSER="%s"\nEMAIL="%s"\nMUSIC="%s"\nMESSENGER="%s"\nLAUNCHER="%s"\n' \
-  "$TERMINAL" "$BROWSER" "$EMAIL" "$MUSIC" "$MESSENGER" "$LAUNCHER" > "$HOME/.config/omacosy/apps.conf"
+printf 'TERMINAL="%s"\nBROWSER="%s"\nEMAIL="%s"\nMUSIC="%s"\nMESSENGER="%s"\nLAUNCHER="%s"\nOMNIWM_CLIPBOARD="%s"\n' \
+  "$TERMINAL" "$BROWSER" "$EMAIL" "$MUSIC" "$MESSENGER" "$LAUNCHER" "$OMNIWM_CLIPBOARD" > "$HOME/.config/omacosy/apps.conf"
 
 # --- 1. Homebrew ------------------------------------------------------------
 if ! command -v brew >/dev/null 2>&1; then
@@ -425,8 +437,23 @@ link "$REPO_DIR/config/aerospace"    "$HOME/.config/aerospace"
 # ghostty reads this AND its Application Support config, so personal
 # settings there survive
 link "$REPO_DIR/config/ghostty"      "$HOME/.config/ghostty"
-# OmniWM trial (this branch): settings are canonical TOML, live-reloaded
-link "$REPO_DIR/config/omniwm"       "$HOME/.config/omniwm"
+# OmniWM writes settings.toml itself, and the clipboard policy writes it
+# too. Keep that file OUTSIDE the clone: linking the directory would make
+# every OmniWM write dirty the clone, and omacosy-update refuses a dirty
+# clone. A previous install symlinked the directory; migrate it to a real
+# directory first, keeping the current settings.
+OMNIDIR="$HOME/.config/omniwm"
+if [ -L "$OMNIDIR" ]; then
+  OMNITMP="$OMNIDIR.copy.$$"
+  rm -rf "$OMNITMP"
+  cp -R "$OMNIDIR/." "$OMNITMP" 2>/dev/null || mkdir -p "$OMNITMP"
+  rm "$OMNIDIR"
+  mv "$OMNITMP" "$OMNIDIR"
+fi
+mkdir -p "$OMNIDIR"
+if [ ! -f "$OMNIDIR/settings.toml" ]; then
+  cp "$REPO_DIR/config/omniwm/settings.toml" "$OMNIDIR/settings.toml"
+fi
 
 # Karabiner is COPIED, not symlinked: its background services can't read
 # configs living under ~/Documents (TCC folder protection) without Full
@@ -791,7 +818,15 @@ link "$REPO_DIR/bin/omacosy-finder-window" "$HOME/.local/bin/omacosy-finder-wind
 link "$REPO_DIR/bin/omacosy-browser" "$HOME/.local/bin/omacosy-browser"
 link "$REPO_DIR/bin/omacosy-open" "$HOME/.local/bin/omacosy-open"
 link "$REPO_DIR/bin/omacosy-launcher" "$HOME/.local/bin/omacosy-launcher"
+link "$REPO_DIR/bin/omacosy-omniwm-clipboard" "$HOME/.local/bin/omacosy-omniwm-clipboard"
 link "$REPO_DIR/bin/omacosy-cycle" "$HOME/.local/bin/omacosy-cycle"
+
+# Apply the clipboard policy once the OmniWM settings file exists. The
+# command is a no-op on AeroSpace or when the file is missing.
+if [ -f "$HOME/.config/omniwm/settings.toml" ] \
+   && [ -x "$HOME/.local/bin/omacosy-omniwm-clipboard" ]; then
+  OMACOSY_WM=$WM "$HOME/.local/bin/omacosy-omniwm-clipboard" apply >/dev/null 2>&1 || true
+fi
 
 # --- 3. omarchy theme convention -------------------------------------------
 # Canonical theme state lives at ~/.config/omarchy/current/theme (what the

@@ -228,6 +228,29 @@ omacosy-launcher set tinycast     # write the choice and rebind the chord
 the choice. It does not install the launcher app and never changes the
 window manager.
 
+### OmniWM clipboard history
+
+`OMNIWM_CLIPBOARD` in `config/apps.local.conf` (or `apps.conf`) is
+`follow-launcher` (default), `on` or `off`:
+
+- `follow-launcher` turns OmniWM's clipboard history off when
+  `Super+Space` opens another launcher, so Raycast/Tinycast/Alfred do not
+  run beside a second clipboard manager. When OmniWM is the chosen
+  launcher it leaves the existing setting alone, and it never turns
+  history back on by itself.
+- `on` forces `[clipboard] historyEnabled = true`.
+- `off` forces `false`.
+
+```sh
+omacosy-omniwm-clipboard status
+omacosy-omniwm-clipboard apply
+omacosy-omniwm-clipboard delete --yes   # explicit; normal mode asks first
+```
+
+Turning history off stops new captures but does **not** delete
+`~/.local/state/omniwm/clipboard-history.json`; `delete` is the explicit
+removal. OmniWM watches `settings.toml` and live-reloads the change.
+
 Your personal shell config belongs in `~/.zshrc.local`; the repo's
 `zshrc` wires the CLI stack and sources it.
 

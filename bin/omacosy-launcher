@@ -226,7 +226,7 @@ write_choice() {
 }
 
 set_launcher() {
-  local value=$1 kara
+  local value=$1 kara clipboard
   valid "$value" || {
     echo "omacosy-launcher: expected auto|raycast|tinycast|alfred|omniwm|none" >&2
     exit 2
@@ -246,6 +246,10 @@ set_launcher() {
     [ -x "$kara" ] && "$kara" install >/dev/null 2>&1 \
       || echo "omacosy-launcher: could not refresh the OmniWM Karabiner rules" >&2
   fi
+
+  # Keep OmniWM's clipboard policy in step with the launcher choice.
+  clipboard="$HOME/.local/bin/omacosy-omniwm-clipboard"
+  [ -x "$clipboard" ] && "$clipboard" apply >/dev/null 2>&1 || true
 
   case "$value" in
     raycast | tinycast | alfred)
